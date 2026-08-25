@@ -1,0 +1,41 @@
+# Environment
+.env
+credentials.json
+*.credentials.json
+
+# Browser profiles
+.browser/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug outputs
+debug_*.png
+debug_*.html
