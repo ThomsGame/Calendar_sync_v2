@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Configuration — Google Calendar{% endblock %}
+
+{% block content %}
+<div class="setup-container">
+  <div class="setup-steps">
+    <div class="setup-step done">1. Snexi ✓</div>
+    <div class="setup-step done">2. Constatimmo ✓</div>
+    <div class="setup-step active">3. Google</div>
+  </div>
+
+  <div class="card">
+    <h2>Google Calendar &amp; Gmail</h2>
+    <p class="text-muted">
+      Connectez votre compte Google pour permettre la synchronisation des rendez-vous
+      et la création de brouillons d'emails.
+    </p>
+
+    {% if has_google_oauth %}
+    <div class="google-oauth-section">
+      <p>
+        {% if creds.google_refresh_token_enc %}
+          <span class="badge badge-success">&#10003; Compte Google connecté</span>
+        {% else %}
+          Cliquez pour autoriser l'accès à votre Google Calendar et Gmail.
+        {% endif %}
+      </p>
+      <a href="{{ url_for('setup.google_auth') }}" class="btn btn-google">
+        {% if creds.google_refresh_token_enc %}Reconnecter le compte Google{% else %}Connecter mon compte Google{% endif %}
+      </a>
+    </div>
+    <hr class="divider" />
+    {% else %}
+    <div class="alert alert-warning">
+      Google OAuth n'est pas configuré sur ce serveur. Entrez manuellement vos IDs de calendrier.
+    </div>
+    {% endif %}
+
+    <form method="post">
+      <div class="form-group">
+        <label for="google_calendar_os_id">
+          ID Calendrier OS (Snexi)
+          <span class="label-hint">Ex: abc123@group.calendar.google.com ou <code>primary</code></span>
+        </label>
+        <input type="text" id="google_calendar_os_id" name="google_calendar_os_id"
+               value="{{ creds.google_calendar_os_id or '' }}"
+               placeholder="primary" />
+      </div>
+      <div class="form-group">
+        <label for="google_calendar_odm_id">
+          ID Calendrier ODM (Constatimmo)
+          <span class="label-hint">Peut être identique au calendrier OS, ou un calendrier séparé.</span>
+        </label>
+        <input type="text" id="google_calendar_odm_id" name="google_calendar_odm_id"
+               value="{{ creds.google_calendar_odm_id or '' }}"
+               placeholder="primary" />
+      </div>
+
+      <div class="form-actions form-actions-right">
+        <a href="{{ url_for('setup.step2_constatimmo') }}" class="btn btn-link">← Retour</a>
+        <button type="submit" class="btn btn-primary">Terminer la configuration ✓</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
