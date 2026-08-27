@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Paramètres{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Paramètres</h1>
+</div>
+
+<!-- Snexi -->
+<div class="card">
+  <h3>Accès Snexi</h3>
+  <form method="post">
+    <input type="hidden" name="section" value="snexi" />
+    <div class="form-row">
+      <div class="form-group">
+        <label>Identifiant</label>
+        <input type="text" name="snexi_username" value="{{ creds.snexi_username or '' }}"
+               placeholder="Identifiant Snexi" />
+      </div>
+      <div class="form-group">
+        <label>Mot de passe</label>
+        <input type="password" name="snexi_password"
+               placeholder="{{ '••••••• (enregistré)' if snexi_pw_set else 'Nouveau mot de passe' }}" />
+        {% if snexi_pw_set %}
+        <small class="text-muted">Laissez vide pour conserver le mot de passe actuel.</small>
+        {% endif %}
+      </div>
+    </div>
+    <button type="submit" class="btn btn-secondary">Mettre à jour Snexi</button>
+  </form>
+</div>
+
+<!-- Constatimmo -->
+<div class="card">
+  <h3>Accès Constatimmo</h3>
+  <form method="post">
+    <input type="hidden" name="section" value="constatimmo" />
+    <div class="form-row">
+      <div class="form-group">
+        <label>Identifiant</label>
+        <input type="text" name="constatimmo_username" value="{{ creds.constatimmo_username or '' }}"
+               placeholder="Identifiant Constatimmo" />
+      </div>
+      <div class="form-group">
+        <label>Mot de passe</label>
+        <input type="password" name="constatimmo_password"
+               placeholder="{{ '••••••• (enregistré)' if constatimmo_pw_set else 'Nouveau mot de passe' }}" />
+        {% if constatimmo_pw_set %}
+        <small class="text-muted">Laissez vide pour conserver le mot de passe actuel.</small>
+        {% endif %}
+      </div>
+    </div>
+    <button type="submit" class="btn btn-secondary">Mettre à jour Constatimmo</button>
+  </form>
+</div>
+
+<!-- Google Calendar -->
+<div class="card">
+  <h3>Google Calendar</h3>
+  {% if google_connected %}
+  <p><span class="badge badge-success">&#10003; Compte Google connecté</span>
+    <a href="{{ url_for('setup.google_auth') }}" class="btn-link" style="margin-left:1rem;">Reconnecter</a>
+  </p>
+  {% else %}
+  <p>
+    <span class="badge badge-warning">Compte Google non connecté</span>
+    <a href="{{ url_for('setup.google_auth') }}" class="btn btn-google" style="margin-left:1rem;">Connecter Google</a>
+  </p>
+  {% endif %}
+  <form method="post" style="margin-top:1rem;">
+    <input type="hidden" name="section" value="google" />
+    <div class="form-row">
+      <div class="form-group">
+        <label>ID Calendrier OS (Snexi)</label>
+        <input type="text" name="google_calendar_os_id"
+               value="{{ creds.google_calendar_os_id or '' }}" placeholder="primary" />
+      </div>
+      <div class="form-group">
+        <label>ID Calendrier ODM (Constatimmo)</label>
+        <input type="text" name="google_calendar_odm_id"
+               value="{{ creds.google_calendar_odm_id or '' }}" placeholder="primary" />
+      </div>
+    </div>
+    <button type="submit" class="btn btn-secondary">Mettre à jour Google</button>
+  </form>
+</div>
+
+<!-- Feature flags -->
+<div class="card">
+  <h3>Options</h3>
+  <form method="post">
+    <input type="hidden" name="section" value="flags" />
+    <div class="form-group form-check">
+      <input type="checkbox" id="snexi_enrich" name="snexi_enrich"
+             {{ 'checked' if creds.snexi_enrich_details }} />
+      <label for="snexi_enrich">Enrichir les détails Snexi (adresse, locataire, digicode…)</label>
+    </div>
+    <div class="form-group form-check">
+      <input type="checkbox" id="constatimmo_enrich" name="constatimmo_enrich"
+             {{ 'checked' if creds.constatimmo_enrich_details }} />
+      <label for="constatimmo_enrich">Enrichir les détails Constatimmo</label>
+    </div>
+    <div class="form-group form-check">
+      <input type="checkbox" id="dry_run" name="dry_run"
+             {{ 'checked' if creds.dry_run }} />
+      <label for="dry_run">Mode simulation (dry run) — ne crée rien dans Google Calendar</label>
+    </div>
+    <button type="submit" class="btn btn-secondary">Enregistrer les options</button>
+  </form>
+</div>
+{% endblock %}
