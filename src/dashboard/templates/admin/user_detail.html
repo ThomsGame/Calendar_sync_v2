@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Admin — {{ user.email }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('admin.index') }}" class="btn-link">← Admin</a>
+    <h1>{{ user.email }}</h1>
+  </div>
+  <form method="post" action="{{ url_for('admin.admin_trigger_sync', user_id=user.id) }}"
+        onsubmit="return confirm('Lancer une sync pour cet utilisateur ?')">
+    <button type="submit" class="btn btn-primary">&#128260; Lancer une sync</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="run-stats">
+    <span class="run-stat"><strong>ID</strong> #{{ user.id }}</span>
+    <span class="run-stat"><strong>Rôle</strong> {{ 'Admin' if user.is_admin else 'Utilisateur' }}</span>
+    <span class="run-stat"><strong>Setup complet</strong> {{ 'Oui' if user.setup_complete else 'Non' }}</span>
+    <span class="run-stat"><strong>Actif</strong> {{ 'Oui' if user.is_active else 'Non' }}</span>
+    <span class="run-stat"><strong>Inscrit le</strong> {{ user.created_at.strftime('%d/%m/%Y') }}</span>
+  </div>
+
+  {% if creds %}
+  <h4 style="margin-top:1rem;">Configuration</h4>
+  <div class="run-stats">
+    <span class="run-stat"><strong>Snexi</strong> {{ creds.snexi_username or '—' }}</span>
+    <span class="run-stat"><strong>Constatimmo</strong> {{ creds.constatimmo_username or '—' }}</span>
+    <span class="run-stat"><strong>Google Calendar OS</strong> {{ creds.google_calendar_os_id or '—' }}</span>
+    <span class="run-stat"><strong>Google Calendar ODM</strong> {{ creds.google_calendar_odm_id or '—' }}</span>
+    <span class="run-stat"><strong>Dry run</strong> {{ 'Oui' if creds.dry_run else 'Non' }}</span>
+    <span class="run-stat"><strong>Google OAuth</strong>
+      {% if creds.google_refresh_token_enc %}
+        <span class="badge badge-success">Connecté</span>
+      {% else %}
+        <span class="badge badge-error">Non connecté</span>
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Synchronisations ({{ runs|length }})</h3>
+  {% if runs %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Type</th>
+        <th>Statut</th>
+        <th>Créés</th>
+        <th>MàJ</th>
+        <th>Erreur</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</td>
+        <td>{{ run.trigger }}</td>
+        <td>
+          {% if run.status == 'success' %}<span class="badge badge-success">OK</span>
+          {% elif run.status == 'error' %}<span class="badge badge-error">Erreur</span>
+          {% elif run.status == 'partial' %}<span class="badge badge-warning">Partielle</span>
+          {% else %}<span class="badge badge-info">{{ run.status }}</span>{% endif %}
+        </td>
+        <td>{{ run.events_created }}</td>
+        <td>{{ run.events_updated }}</td>
+        <td class="text-ellipsis text-error" title="{{ run.error_message or '' }}">
+          {{ (run.error_message or '')[:60] or '—' }}
+        </td>
+        <td><a href="{{ url_for('admin.run_detail', run_id=run.id) }}" class="btn-link">Voir</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucune synchronisation.</p>
+  {% endif %}
+</div>
+{% endblock %}
