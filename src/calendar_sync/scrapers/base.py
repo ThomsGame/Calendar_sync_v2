@@ -6,7 +6,16 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Frame, Page, async_playwright
+
+# Common launch args for Chromium in WSL / headless environments
+_CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--ignore-certificate-errors",
+    "--disable-blink-features=AutomationControlled",
+]
 
 
 class BrowserManager:
@@ -16,30 +25,28 @@ class BrowserManager:
         self.headless = headless
         self.user_data_dir = user_data_dir
         self._playwright = None
-        self._browser: Optional[Browser] = None
+        self._browser: Optional[Browser | BrowserContext] = None
 
-    async def launch(self) -> Browser:
+    async def launch(self) -> Browser | BrowserContext:
         """Launch a new browser instance."""
         self._playwright = await async_playwright().start()
 
-        launch_args: dict = {
-            "headless": self.headless,
-            "args": [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        }
-
         if self.user_data_dir:
+            # Persistent context: first arg is the user data dir path
             path = Path(self.user_data_dir)
             path.mkdir(parents=True, exist_ok=True)
-            launch_args["persistent_context"] = str(path)
             self._browser = await self._playwright.chromium.launch_persistent_context(
-                **launch_args,
+                str(path),
+                headless=self.headless,
+                args=_CHROMIUM_ARGS,
             )
+            logger.debug(f"[BROWSER] Launched persistent context at {path}")
         else:
-            self._browser = await self._playwright.chromium.launch(**launch_args)
+            self._browser = await self._playwright.chromium.launch(
+                headless=self.headless,
+                args=_CHROMIUM_ARGS,
+            )
+            logger.debug("[BROWSER] Launched fresh browser instance.")
 
         return self._browser
 
@@ -47,17 +54,21 @@ class BrowserManager:
         """Create a new page in the browser."""
         if not self._browser:
             await self.launch()
-        if isinstance(self._browser, BrowserContext):
-            return await self._browser.new_page()
         return await self._browser.new_page()
 
     async def close(self) -> None:
         """Close browser and cleanup."""
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
             self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
             self._playwright = None
 
 
