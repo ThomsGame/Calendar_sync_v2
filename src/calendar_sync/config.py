@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +18,7 @@ class Settings(BaseSettings):
     snexi_url: str = "https://snexi.fr/portail"
     snexi_username: str = ""
     snexi_password: str = ""
+    snexi_headless: bool = True
 
     # Constatimmo
     constatimmo_url: str = "https://constatonline.constatimmo.com"
@@ -28,11 +27,17 @@ class Settings(BaseSettings):
     constatimmo_user_data_dir: str = "./.browser/constatimmo"
     constatimmo_headless: bool = True
 
-    # Google Calendar
+    # Google Calendar — OAuth2 user-consent flow
     google_calendar_id: str = "primary"
-    google_credentials_path: str = "./credentials.json"
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+    google_token_path: str = "./token.json"
     google_calendar_os_id: str = ""
     google_calendar_odm_id: str = ""
+
+    # Google Calendar event colors (1-11, Google Calendar palette)
+    google_color_snexi: str = "5"
+    google_color_constatimmo: str = "11"
 
     # Feature flags
     dry_run: bool = False
