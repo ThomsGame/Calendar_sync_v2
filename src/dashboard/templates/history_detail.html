@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Détail — Run #{{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('history.index') }}" class="btn-link">← Historique</a>
+    <h1>Run #{{ run.id }} — {{ run.started_at.strftime('%d/%m/%Y à %H:%M') }}</h1>
+  </div>
+</div>
+
+<div class="card">
+  <div class="run-stats">
+    <span class="run-stat">
+      <strong>Statut</strong>
+      {% if run.status == 'success' %}
+        <span class="badge badge-success">Succès</span>
+      {% elif run.status == 'partial' %}
+        <span class="badge badge-warning">Partielle</span>
+      {% elif run.status in ('running', 'pending') %}
+        <span class="badge badge-info">En cours</span>
+      {% else %}
+        <span class="badge badge-error">Erreur</span>
+      {% endif %}
+    </span>
+    <span class="run-stat"><strong>Déclenchement</strong> {{ run.trigger }}</span>
+    <span class="run-stat"><strong>Snexi</strong> {{ run.snexi_raw }} bruts</span>
+    <span class="run-stat"><strong>Constatimmo</strong> {{ run.constatimmo_raw }} bruts</span>
+    <span class="run-stat"><strong>Conservés</strong> {{ run.events_kept }}</span>
+    <span class="run-stat text-success"><strong>Créés</strong> {{ run.events_created }}</span>
+    <span class="run-stat"><strong>Mis à jour</strong> {{ run.events_updated }}</span>
+    <span class="run-stat text-muted"><strong>Ignorés</strong> {{ run.events_skipped }}</span>
+    {% if run.duration_seconds is not none %}
+    <span class="run-stat text-muted"><strong>Durée</strong> {{ run.duration_seconds }}s</span>
+    {% endif %}
+  </div>
+
+  {% if run.error_message %}
+  <div class="alert alert-error" style="margin-top:1rem;">
+    <strong>Erreur :</strong>
+    <pre class="error-trace">{{ run.error_message }}</pre>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Événements de ce run ({{ events|length }})</h3>
+
+  {% if events %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Heure</th>
+        <th>Type</th>
+        <th>Source</th>
+        <th>Résumé</th>
+        <th>Adresse</th>
+        <th>OS/ODM #</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for evt in events %}
+      <tr>
+        <td>{{ evt.date or '—' }}</td>
+        <td>{{ evt.start_time or '—' }}{% if evt.end_time %} – {{ evt.end_time }}{% endif %}</td>
+        <td>
+          {% if evt.event_type == 'entree' %}<span class="badge badge-blue">Entrée</span>
+          {% elif evt.event_type == 'sortie' %}<span class="badge badge-green">Sortie</span>
+          {% elif evt.event_type == 'odm' %}<span class="badge badge-purple">ODM</span>
+          {% else %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td><span class="source-badge source-{{ evt.source }}">{{ evt.source | capitalize }}</span></td>
+        <td class="text-ellipsis" title="{{ evt.summary or '' }}">{{ (evt.summary or '')[:60] }}</td>
+        <td class="text-ellipsis" title="{{ evt.address or '' }}">{{ (evt.address or '')[:40] or '—' }}</td>
+        <td class="text-muted">{{ evt.os_number or evt.odm_number or '—' }}</td>
+        <td>
+          {% if evt.action == 'created' %}<span class="badge badge-success">Créé</span>
+          {% elif evt.action == 'updated' %}<span class="badge badge-info">MàJ</span>
+          {% else %}<span class="badge badge-neutral">Ignoré</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucun événement enregistré pour ce run.</p>
+  {% endif %}
+</div>
+{% endblock %}
