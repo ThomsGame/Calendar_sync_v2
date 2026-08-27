@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Connexion{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+  <div class="auth-card">
+    <h1 class="auth-title">&#128197; Calendar Sync</h1>
+    <p class="auth-subtitle">Connectez-vous à votre espace</p>
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" class="auth-form">
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required autofocus
+               placeholder="votre@email.com" />
+      </div>
+      <div class="form-group">
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" name="password" required
+               placeholder="••••••••" />
+      </div>
+      <div class="form-group form-check">
+        <input type="checkbox" id="remember" name="remember" />
+        <label for="remember">Se souvenir de moi</label>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">Se connecter</button>
+    </form>
+
+    <p class="auth-footer">
+      Pas encore de compte ?
+      <a href="{{ url_for('auth.register') }}">Créer un compte</a>
+    </p>
+  </div>
+</div>
+{% endblock %}
