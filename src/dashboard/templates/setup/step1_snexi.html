@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Configuration — Snexi{% endblock %}
+
+{% block content %}
+<div class="setup-container">
+  <div class="setup-steps">
+    <div class="setup-step active">1. Snexi</div>
+    <div class="setup-step">2. Constatimmo</div>
+    <div class="setup-step">3. Google</div>
+  </div>
+
+  <div class="card">
+    <h2>Accès Snexi</h2>
+    <p class="text-muted">Entrez vos identifiants du portail Snexi. Ils seront stockés de manière chiffrée.</p>
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" id="snexi-form">
+      <div class="form-group">
+        <label for="snexi_username">Identifiant Snexi</label>
+        <input type="text" id="snexi_username" name="snexi_username"
+               value="{{ creds.snexi_username or '' }}" required
+               placeholder="nom.prenom@exemple.com" />
+      </div>
+      <div class="form-group">
+        <label for="snexi_password">Mot de passe Snexi</label>
+        <input type="password" id="snexi_password" name="snexi_password" required
+               placeholder="{% if creds.snexi_password_enc %}Mot de passe déjà enregistré — laisser vide pour conserver{% else %}Votre mot de passe{% endif %}" />
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="btn-test-snexi" class="btn btn-secondary">
+          Tester la connexion
+        </button>
+        <div id="test-result" class="test-result hidden"></div>
+      </div>
+
+      <div class="form-actions form-actions-right">
+        <a href="{{ url_for('setup.skip_setup') }}" class="btn btn-link">Passer</a>
+        <button type="submit" class="btn btn-primary">Suivant →</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('btn-test-snexi').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-test-snexi');
+  const result = document.getElementById('test-result');
+  const username = document.getElementById('snexi_username').value;
+  const password = document.getElementById('snexi_password').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Test en cours...';
+  result.className = 'test-result';
+  result.textContent = '';
+
+  try {
+    const fd = new FormData();
+    fd.append('snexi_username', username);
+    fd.append('snexi_password', password);
+    const resp = await fetch('{{ url_for("setup.test_snexi") }}', { method: 'POST', body: fd });
+    const data = await resp.json();
+    result.textContent = data.message;
+    result.classList.add(data.ok ? 'test-ok' : 'test-error');
+    result.classList.remove('hidden');
+  } catch (e) {
+    result.textContent = 'Erreur réseau.';
+    result.classList.add('test-error');
+    result.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Tester la connexion';
+  }
+});
+</script>
+{% endblock %}
