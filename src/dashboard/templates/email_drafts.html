@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Brouillons d'emails{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Brouillons d'emails</h1>
+</div>
+
+<div class="card">
+  <p class="text-muted">
+    Les brouillons créés automatiquement lors des synchronisations apparaissent ici.
+    Rendez-vous dans Gmail pour les réviser et les envoyer.
+  </p>
+
+  {% if drafts %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Destinataire</th>
+        <th>Objet</th>
+        <th>Aperçu</th>
+        <th>Statut</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for draft in drafts %}
+      <tr>
+        <td>{{ draft.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
+        <td>{{ draft.recipient or '—' }}</td>
+        <td class="text-ellipsis" title="{{ draft.subject or '' }}">{{ (draft.subject or '')[:60] }}</td>
+        <td class="text-ellipsis text-muted" title="{{ draft.body_preview or '' }}">{{ (draft.body_preview or '')[:80] }}</td>
+        <td>
+          {% if draft.status == 'draft' %}
+            <span class="badge badge-neutral">Brouillon</span>
+          {% elif draft.status == 'sent' %}
+            <span class="badge badge-success">Envoyé</span>
+          {% else %}
+            <span class="badge badge-warning">Inconnu</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucun brouillon créé pour le moment.</p>
+  {% endif %}
+</div>
+{% endblock %}
