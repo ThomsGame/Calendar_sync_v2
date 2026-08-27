@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Admin — Run #{{ run.id }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('admin.user_detail', user_id=run.user_id) }}" class="btn-link">← Utilisateur</a>
+    <h1>Run #{{ run.id }} — {{ run.user.email }}</h1>
+  </div>
+</div>
+
+<div class="card">
+  <div class="run-stats">
+    <span class="run-stat"><strong>Date</strong> {{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</span>
+    <span class="run-stat"><strong>Fin</strong> {{ run.finished_at.strftime('%H:%M:%S') if run.finished_at else '—' }}</span>
+    <span class="run-stat"><strong>Durée</strong> {{ run.duration_seconds }}s</span>
+    <span class="run-stat"><strong>Statut</strong>
+      {% if run.status == 'success' %}<span class="badge badge-success">Succès</span>
+      {% elif run.status == 'error' %}<span class="badge badge-error">Erreur</span>
+      {% elif run.status == 'partial' %}<span class="badge badge-warning">Partielle</span>
+      {% else %}<span class="badge badge-info">{{ run.status }}</span>{% endif %}
+    </span>
+    <span class="run-stat"><strong>Trigger</strong> {{ run.trigger }}</span>
+    <span class="run-stat"><strong>Snexi bruts</strong> {{ run.snexi_raw }}</span>
+    <span class="run-stat"><strong>Constatimmo bruts</strong> {{ run.constatimmo_raw }}</span>
+    <span class="run-stat"><strong>Conservés</strong> {{ run.events_kept }}</span>
+    <span class="run-stat text-success"><strong>Créés</strong> {{ run.events_created }}</span>
+    <span class="run-stat"><strong>MàJ</strong> {{ run.events_updated }}</span>
+    <span class="run-stat text-muted"><strong>Ignorés</strong> {{ run.events_skipped }}</span>
+  </div>
+
+  {% if run.error_message %}
+  <div class="alert alert-error" style="margin-top:1rem;">
+    <strong>Trace d'erreur :</strong>
+    <pre class="error-trace">{{ run.error_message }}</pre>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Événements ({{ events|length }})</h3>
+  {% if events %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Heure</th>
+        <th>Type</th>
+        <th>Source</th>
+        <th>Résumé</th>
+        <th>Adresse</th>
+        <th>Réf.</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for evt in events %}
+      <tr>
+        <td>{{ evt.date or '—' }}</td>
+        <td>{{ evt.start_time or '—' }}{% if evt.end_time %} – {{ evt.end_time }}{% endif %}</td>
+        <td>
+          {% if evt.event_type == 'entree' %}<span class="badge badge-blue">Entrée</span>
+          {% elif evt.event_type == 'sortie' %}<span class="badge badge-green">Sortie</span>
+          {% elif evt.event_type == 'odm' %}<span class="badge badge-purple">ODM</span>
+          {% else %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td><span class="source-badge source-{{ evt.source }}">{{ evt.source | capitalize }}</span></td>
+        <td class="text-ellipsis">{{ (evt.summary or '')[:60] }}</td>
+        <td class="text-ellipsis">{{ (evt.address or '')[:40] or '—' }}</td>
+        <td class="text-muted">{{ evt.os_number or evt.odm_number or '—' }}</td>
+        <td>
+          {% if evt.action == 'created' %}<span class="badge badge-success">Créé</span>
+          {% elif evt.action == 'updated' %}<span class="badge badge-info">MàJ</span>
+          {% else %}<span class="badge badge-neutral">Ignoré</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucun événement enregistré.</p>
+  {% endif %}
+</div>
+{% endblock %}
