@@ -1,29 +1,148 @@
-"""Google Calendar synchronization with deduplication."""
+"""Google Calendar synchronization with deduplication.
+
+Authentication uses OAuth2 user-consent flow (token.json + client_id/secret).
+On first run without a valid token.json the script will print an authorization
+URL — open it in a browser, authenticate with the Google account, and paste the
+resulting code back. The token is then saved to token.json for future runs.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from google.auth import jwt
+import httplib2
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from loguru import logger
+
+# Corporate CA bundles in this environment have issues with Python's stricter SSL.
+# Google's endpoints are trusted; we disable verification for the httplib2 transport
+# used internally by google-api-python-client.
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "0")
+_HTTP = httplib2.Http(disable_ssl_certificate_validation=True)
 
 from calendar_sync.config import Settings
 from calendar_sync.models.appointment import Appointment, EventMeta
 from calendar_sync.utils.helpers import compact_text, extract_odm_number, extract_os_number
 
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def _load_or_refresh_credentials(settings: Settings) -> Optional[Credentials]:
+    """Load token.json, refresh if expired, run consent flow if missing."""
+    token_path = Path(settings.google_token_path)
+    client_id = settings.google_oauth_client_id
+    client_secret = settings.google_oauth_client_secret
+
+    creds: Optional[Credentials] = None
+
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        except Exception as e:
+            logger.warning(f"[GOOGLE] Could not load token.json: {e}")
+            creds = None
+
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            # Use requests with SSL disabled to work around corporate CA issues
+            import requests
+            session = requests.Session()
+            session.verify = False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            from google.auth.transport.requests import Request as GRequest
+            creds.refresh(GRequest(session=session))
+            token_path.write_text(creds.to_json())
+            logger.info("[GOOGLE] Token refreshed and saved.")
+            return creds
+        except Exception as e:
+            logger.warning(f"[GOOGLE] Token refresh failed: {e} — will re-authenticate.")
+            creds = None
+
+    # Need to run consent flow
+    if not client_id or not client_secret:
+        logger.error(
+            "[GOOGLE] No valid token.json and GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET "
+            "are not set. Cannot authenticate with Google."
+        )
+        return None
+
+    client_config = {
+        "installed": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
+        }
+    }
+
+    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+
+    # Try localhost server first (works in interactive terminal with a browser)
+    try:
+        logger.info("[GOOGLE] Opening browser for OAuth2 consent...")
+        creds = flow.run_local_server(port=0, open_browser=True)
+    except Exception:
+        # Fallback: print URL and ask for code (headless environments)
+        logger.info("[GOOGLE] Browser not available — using manual consent flow.")
+        flow2 = InstalledAppFlow.from_client_config(client_config, SCOPES)
+        auth_url, _ = flow2.authorization_url(prompt="consent")
+        logger.info(f"\n[GOOGLE] Please open this URL in your browser:\n\n  {auth_url}\n")
+        code = input("[GOOGLE] Enter the authorization code: ").strip()
+        flow2.fetch_token(code=code)
+        creds = flow2.credentials
+
+    token_path.write_text(creds.to_json())
+    logger.info(f"[GOOGLE] Token saved to {token_path}")
+    return creds
+
+
+def get_google_service(settings: Settings):
+    """Build and return an authenticated Google Calendar service."""
+    creds = _load_or_refresh_credentials(settings)
+    if not creds:
+        return None
+    return build("calendar", "v3", credentials=creds, http=_HTTP)
+
+
+def get_gmail_service(settings: Settings):
+    """Build and return an authenticated Gmail service."""
+    creds = _load_or_refresh_credentials(settings)
+    if not creds:
+        return None
+    return build("gmail", "v1", credentials=creds, http=_HTTP)
+
+
+# ---------------------------------------------------------------------------
+# Event building helpers
+# ---------------------------------------------------------------------------
 
 def _build_datetime(date_iso: str, time_hhmm: str = "08:00") -> str:
-    """Build ISO datetime string from date and time."""
     return f"{date_iso}T{time_hhmm.zfill(5)}:00"
 
 
 def _add_minutes(date_iso: str, time_hhmm: str, minutes: int) -> str:
-    """Add minutes to a datetime."""
     parts = time_hhmm.split(":")
     h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
     dt = datetime.strptime(f"{date_iso}T{h:02d}:{m:02d}:00", "%Y-%m-%dT%H:%M:%S")
@@ -32,7 +151,6 @@ def _add_minutes(date_iso: str, time_hhmm: str, minutes: int) -> str:
 
 
 def _parse_date_from_text(text: Optional[str]) -> Optional[str]:
-    """Parse date from text like '10/08/2026'."""
     m = re.search(r"\b(\d{2})/(\d{2})/(\d{4})\b", str(text or ""))
     if not m:
         return None
@@ -40,9 +158,8 @@ def _parse_date_from_text(text: Optional[str]) -> Optional[str]:
 
 
 def _parse_times_from_text(text: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Parse time range from text."""
     s = str(text or "")
-    m = re.search(r"\b(\d{1,2}:\d{2})\s*[\-–]\s*(\d{1,2}:\d{2})\b", s)
+    m = re.search(r"\b(\d{1,2}:\d{2})\s*[\-\u2013]\s*(\d{1,2}:\d{2})\b", s)
     if m:
         return m.group(1).zfill(5), m.group(2).zfill(5)
     m = re.search(r"\b(\d{1,2}:\d{2})\b", s)
@@ -51,26 +168,32 @@ def _parse_times_from_text(text: Optional[str]) -> tuple[Optional[str], Optional
     return None, None
 
 
-def _build_summary(evt: Appointment, meta: EventMeta) -> str:
-    """Build Google Calendar event summary."""
-    is_odm = evt.source.value == "constatimmo" or meta.type.value == "odm" or bool(
-        re.search(r"\bodm\b", evt.text or "", re.IGNORECASE)
+def _is_odm_event(evt: Appointment, meta: EventMeta) -> bool:
+    return (
+        evt.source.value == "constatimmo"
+        or meta.type.value == "odm"
+        or bool(re.search(r"\bodm\b", evt.text or "", re.IGNORECASE))
     )
-    family = "ODM" if is_odm else "OS"
+
+
+def _build_summary(evt: Appointment, meta: EventMeta) -> str:
+    if _is_odm_event(evt, meta):
+        # ODM events: "ODM E" for entree, "ODM S" for sortie, "ODM" for others
+        if meta.type.value == "entree":
+            return "ODM E"
+        elif meta.type.value == "sortie":
+            return "ODM S"
+        return "ODM"
+    # OS events
     suffix = "E" if meta.type.value == "entree" else "S"
-    return f"{family} {suffix}"
+    return f"OS {suffix}"
 
 
 def _get_dedup_family(evt: Appointment, meta: EventMeta) -> str:
-    """Determine dedup family (os or odm)."""
-    is_odm = evt.source.value == "constatimmo" or meta.type.value == "odm" or bool(
-        re.search(r"\bodm\b", evt.text or "", re.IGNORECASE)
-    )
-    return "odm" if is_odm else "os"
+    return "odm" if _is_odm_event(evt, meta) else "os"
 
 
 def _get_event_ref_number(evt: Appointment, meta: EventMeta) -> str:
-    """Get reference number for deduplication."""
     family = _get_dedup_family(evt, meta)
     if family == "odm":
         by_field = compact_text(evt.odm_number or "")
@@ -82,64 +205,99 @@ def _get_event_ref_number(evt: Appointment, meta: EventMeta) -> str:
     return by_field or by_text
 
 
-def _build_odm_description(evt: Appointment) -> str:
-    """Build ODM event description with contact details."""
-    owner = compact_text(evt.owner or "")
-    tenant = compact_text(evt.tenant or "")
-    phone = compact_text(evt.tenant_mobile or evt.tenant_phone or "")
-    contact_parts = [
-        f"Proprietaire: {owner}" if owner else "",
-        f"Locataire: {tenant}" if tenant else "",
-        f"Telephone locataire: {phone}" if phone else "",
-    ]
+def _build_description(evt: Appointment, family: str) -> str:
+    """Build event description with all enriched details."""
+    lines = []
+
+    # Raw text / description
     base = compact_text(evt.description or evt.text or "")
-    if not any(contact_parts):
-        return base
-    return " | ".join(filter(None, [base] + contact_parts))
+    if base:
+        lines.append(base)
+
+    # Contact details
+    if evt.owner:
+        lines.append(f"Proprietaire: {compact_text(evt.owner)}")
+    if evt.manager:
+        lines.append(f"Gestionnaire: {compact_text(evt.manager)}")
+    if evt.tenant:
+        lines.append(f"Locataire: {compact_text(evt.tenant)}")
+    phone = compact_text(evt.tenant_mobile or evt.tenant_phone or "")
+    if phone:
+        label = "Portable" if evt.tenant_mobile else "Telephone"
+        lines.append(f"{label} locataire: {phone}")
+    if evt.comment:
+        lines.append(f"Commentaire: {compact_text(evt.comment)}")
+
+    # Access info
+    if evt.key_pickup_place:
+        lines.append(f"Recuperation cles: {compact_text(evt.key_pickup_place)}")
+    if evt.key_drop_place:
+        lines.append(f"Depot cles: {compact_text(evt.key_drop_place)}")
+    if evt.floor:
+        lines.append(f"Etage: {compact_text(evt.floor)}")
+    if evt.door:
+        lines.append(f"Porte: {compact_text(evt.door)}")
+    if evt.digicode:
+        lines.append(f"Digicode: {compact_text(evt.digicode)}")
+    if evt.building:
+        lines.append(f"Batiment: {compact_text(evt.building)}")
+    if evt.detail_url:
+        lines.append(f"Fiche: {evt.detail_url}")
+
+    return " | ".join(lines) if lines else ""
 
 
-async def sync_to_google_calendar(events: list[Appointment], settings: Settings) -> None:
-    """Sync appointments to Google Calendar."""
-    credentials_path = Path(settings.google_credentials_path)
+# ---------------------------------------------------------------------------
+# Main sync function
+# ---------------------------------------------------------------------------
+
+async def sync_to_google_calendar(events: list[Appointment], settings: Settings) -> tuple[int, int, int]:
+    """Sync appointments to Google Calendar.
+
+    Returns:
+        (created_count, updated_count, skipped_count)
+    """
     dry_run = settings.dry_run
 
-    if not credentials_path.exists():
-        logger.error(f"[GOOGLE] Credentials file not found: {credentials_path}")
-        return
+    service = get_google_service(settings)
+    if not service:
+        logger.error("[GOOGLE] Could not build Google Calendar service — aborting sync.")
+        return 0, 0, 0
 
-    credentials = json.loads(credentials_path.read_text())
-    client_email = credentials["client_email"]
-    private_key = credentials["private_key"]
+    # Fetch existing events (14 days back, 120 days forward)
+    now = datetime.utcnow()
+    time_min = (now - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_max = (now + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    auth = jwt.Credentials.from_service_account_info(
-        credentials,
-        scopes=["https://www.googleapis.com/auth/calendar"],
-    )
-    service = build("calendar", "v3", credentials=auth)
+    existing_events: list[dict] = []
+    cal_ids = {settings.os_calendar_id, settings.odm_calendar_id}
+    for cal_id in cal_ids:
+        page_token = None
+        while True:
+            try:
+                result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    maxResults=500,
+                    pageToken=page_token,
+                ).execute()
+                for ev in result.get("items", []):
+                    ev["_calendarId"] = cal_id
+                    existing_events.append(ev)
+                page_token = result.get("nextPageToken")
+                if not page_token:
+                    break
+            except Exception as e:
+                logger.warning(f"[GOOGLE] Could not list events from {cal_id}: {e}")
+                break
 
-    # Fetch existing events
-    now = datetime.now()
-    time_min = (now - timedelta(days=14)).isoformat() + "Z"
-    time_max = (now + timedelta(days=120)).isoformat() + "Z"
-
-    existing_events = []
-    for cal_id in {settings.os_calendar_id, settings.odm_calendar_id}:
-        try:
-            result = service.events().list(
-                calendarId=cal_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                singleEvents=True,
-                orderBy="startTime",
-                maxResults=2500,
-            ).execute()
-            for ev in result.get("items", []):
-                ev["_calendarId"] = cal_id
-                existing_events.append(ev)
-        except Exception as e:
-            logger.warning(f"[GOOGLE] Could not list events from {cal_id}: {e}")
+    logger.info(f"[GOOGLE] Fetched {len(existing_events)} existing events from {len(cal_ids)} calendar(s).")
 
     created_count = 0
+    updated_count = 0
     skipped_count = 0
 
     for evt in events:
@@ -148,37 +306,49 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
             skipped_count += 1
             continue
 
-        parsed_date = evt.date or _parse_date_from_text(evt.text) or _parse_date_from_text(evt.description)
-        t = _parse_times_from_text(f"{evt.start_time or ''} {evt.end_time or ''} {evt.time_raw or ''} {evt.text or ''}")
+        # Resolve date and times
+        parsed_date = (
+            evt.date
+            or _parse_date_from_text(evt.text)
+            or _parse_date_from_text(evt.description)
+        )
+        t = _parse_times_from_text(
+            f"{evt.start_time or ''} {evt.end_time or ''} {evt.time_raw or ''} {evt.text or ''}"
+        )
         start_time = evt.start_time or t[0] or "08:00"
         end_time = evt.end_time or t[1]
 
         if not parsed_date:
-            logger.warning(f"[SYNC] Date not found, skipping: {evt.text}")
+            logger.warning(f"[SYNC] No date found, skipping: {evt.text!r}")
             skipped_count += 1
             continue
 
         start_iso = _build_datetime(parsed_date, start_time)
-        end_iso = _build_datetime(parsed_date, end_time) if end_time else _add_minutes(parsed_date, start_time, 45)
+        end_iso = (
+            _build_datetime(parsed_date, end_time)
+            if end_time
+            else _add_minutes(parsed_date, start_time, 45)
+        )
 
-        summary = _build_summary(evt, meta)
         family = _get_dedup_family(evt, meta)
+        summary = _build_summary(evt, meta)
         ref_number = _get_event_ref_number(evt, meta)
         target_cal_id = settings.odm_calendar_id if family == "odm" else settings.os_calendar_id
         start_key = start_iso[:16]
+        color_id = settings.google_color_constatimmo if family == "odm" else settings.google_color_snexi
+        description = _build_description(evt, family)
 
-        final_description = _build_odm_description(evt) if family == "odm" else (evt.description or evt.text or "")
-
-        g_event = {
+        g_event: dict = {
             "summary": summary,
             "location": evt.address or "",
-            "description": final_description,
+            "description": description,
             "start": {"dateTime": start_iso, "timeZone": "Europe/Paris"},
             "end": {"dateTime": end_iso, "timeZone": "Europe/Paris"},
+            "colorId": str(color_id),
         }
 
-        # Dedup by ref number + start time
-        dup_by_ref = None
+        # --- Dedup by ref number + start time ---
+        dup_by_ref: Optional[dict] = None
         if ref_number:
             for ev in existing_events:
                 if ev.get("_calendarId") != target_cal_id:
@@ -186,46 +356,41 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
                 ev_start = (ev.get("start", {}).get("dateTime", ""))[:16]
                 if ev_start != start_key:
                     continue
-                ev_src = f"{ev.get('summary', '')} {ev.get('description', '')} {ev.get('location', '')}"
-                if family == "odm":
-                    ev_ref = extract_odm_number(ev_src)
-                else:
-                    ev_ref = extract_os_number(ev_src)
+                ev_src = f"{ev.get('summary','')} {ev.get('description','')} {ev.get('location','')}"
+                ev_ref = extract_odm_number(ev_src) if family == "odm" else extract_os_number(ev_src)
                 if ev_ref == ref_number:
                     dup_by_ref = ev
                     break
-            else:
-                dup_by_ref = None
 
         if dup_by_ref:
             skipped_count += 1
-            logger.info(f"[SYNC][DUPLICATE] {family.upper()} {ref_number} already exists at {start_iso} - skipped.")
+            logger.debug(f"[SYNC][DUP] {family.upper()} {ref_number} at {start_iso} — skipped (ref match).")
             continue
 
-        # Check by summary + time
-        dup_event = None
-        candidate_summaries = [summary.lower()]
+        # --- Dedup by summary + start time ---
+        dup_event: Optional[dict] = None
         for ev in existing_events:
-            if (ev.get("_calendarId", target_cal_id)) != target_cal_id:
+            if ev.get("_calendarId") != target_cal_id:
                 continue
-            ev_summary = (ev.get("summary", "") or "").lower()
-            ev_start = (ev.get("start", {}).get("dateTime", ""))[:16]
-            if ev_summary in candidate_summaries and ev_start == start_key:
-                dup_event = ev
-                break
+            if (ev.get("summary", "") or "").lower() == summary.lower():
+                ev_start = (ev.get("start", {}).get("dateTime", ""))[:16]
+                if ev_start == start_key:
+                    dup_event = ev
+                    break
 
         if dup_event:
             needs_update = (
                 (dup_event.get("summary", "") or "").strip() != summary
-                or (dup_event.get("location", "") or "").strip() != (g_event["location"] or "")
-                or (dup_event.get("description", "") or "").strip() != (g_event["description"] or "")
+                or (dup_event.get("location", "") or "").strip() != (g_event["location"])
+                or (dup_event.get("description", "") or "").strip() != description
             )
             if not needs_update:
                 skipped_count += 1
+                logger.debug(f"[SYNC][DUP] {summary} at {start_iso} — unchanged, skipped.")
                 continue
             if dry_run:
-                created_count += 1
-                logger.info(f"[DRY_RUN] Would update: {summary} {start_iso} cal={target_cal_id}")
+                updated_count += 1
+                logger.info(f"[DRY_RUN] Would update: {summary} {start_iso}")
                 continue
             try:
                 service.events().patch(
@@ -234,34 +399,44 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
                     body={
                         "summary": summary,
                         "location": g_event["location"],
-                        "description": g_event["description"],
+                        "description": description,
+                        "colorId": str(color_id),
                     },
                 ).execute()
-                created_count += 1
-                logger.info(f"[GOOGLE] Updated: {summary} ID={dup_event['id']} cal={target_cal_id}")
+                updated_count += 1
+                logger.info(f"[GOOGLE] Updated: {summary} at {start_iso} (ID={dup_event['id']})")
             except Exception as e:
                 logger.error(f"[GOOGLE] Error updating event: {e}")
             continue
 
+        # --- Create new event ---
         if dry_run:
             created_count += 1
-            logger.info(f"[DRY_RUN] Would create: {summary} {start_iso} cal={target_cal_id}")
+            logger.info(f"[DRY_RUN] Would create: {summary} {start_iso} @ {target_cal_id}")
             continue
 
         try:
-            result = service.events().insert(
-                calendarId=target_cal_id, body=g_event
-            ).execute()
+            result = service.events().insert(calendarId=target_cal_id, body=g_event).execute()
             created_count += 1
-            logger.info(f"[GOOGLE] Created: {summary} ID={result['id']} cal={target_cal_id}")
+            logger.info(
+                f"[GOOGLE] Created: {summary} on {parsed_date} {start_time}"
+                f"{f'-{end_time}' if end_time else ''}"
+                f"{f' @ {evt.address}' if evt.address else ''}"
+                f" (ID={result['id']})"
+            )
+            # Add to local cache to avoid intra-run duplicates
             existing_events.append({
+                "id": result["id"],
                 "summary": summary,
-                "description": g_event["description"],
+                "description": description,
                 "location": g_event["location"],
                 "start": {"dateTime": start_iso},
                 "_calendarId": target_cal_id,
             })
         except Exception as e:
-            logger.error(f"[GOOGLE] Error creating event: {e}")
+            logger.error(f"[GOOGLE] Error creating event {summary} {start_iso}: {e}")
 
-    logger.info(f"[SYNC] Created: {created_count} | Skipped: {skipped_count}")
+    logger.info(
+        f"[SYNC] Done — Created: {created_count} | Updated: {updated_count} | Skipped: {skipped_count}"
+    )
+    return created_count, updated_count, skipped_count
