@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Calendar Sync{% endblock %} — Calendar Sync</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+
+{% if current_user.is_authenticated %}
+<nav class="navbar">
+  <div class="nav-brand">
+    <a href="{{ url_for('dashboard.home') }}">&#128197; Calendar Sync</a>
+  </div>
+  <ul class="nav-links">
+    <li><a href="{{ url_for('dashboard.home') }}" {% if request.endpoint == 'dashboard.home' %}class="active"{% endif %}>Tableau de bord</a></li>
+    <li><a href="{{ url_for('history.index') }}" {% if request.blueprint == 'history' %}class="active"{% endif %}>Historique</a></li>
+    <li><a href="{{ url_for('drafts.index') }}" {% if request.blueprint == 'drafts' %}class="active"{% endif %}>Brouillons</a></li>
+    <li><a href="{{ url_for('settings.index') }}" {% if request.blueprint == 'settings' %}class="active"{% endif %}>Paramètres</a></li>
+    {% if current_user.is_admin %}
+    <li><a href="{{ url_for('admin.index') }}" {% if request.blueprint == 'admin' %}class="active"{% endif %}>Admin</a></li>
+    {% endif %}
+    <li class="nav-user">
+      <span>{{ current_user.email }}</span>
+      <a href="{{ url_for('auth.logout') }}" class="btn-link">Déconnexion</a>
+    </li>
+  </ul>
+</nav>
+{% endif %}
+
+<main class="main-content">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-container">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
