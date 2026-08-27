@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Historique{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Historique des synchronisations</h1>
+</div>
+
+<div class="card">
+  {% if runs %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Déclenchement</th>
+        <th>Statut</th>
+        <th>Snexi</th>
+        <th>Constatimmo</th>
+        <th>Conservés</th>
+        <th>Créés</th>
+        <th>MàJ</th>
+        <th>Durée</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</td>
+        <td>
+          {% if run.trigger == 'scheduled' %}
+            <span class="badge badge-neutral">Auto</span>
+          {% elif run.trigger == 'admin' %}
+            <span class="badge badge-warning">Admin</span>
+          {% else %}
+            <span class="badge badge-info">Manuel</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if run.status == 'success' %}
+            <span class="badge badge-success">OK</span>
+          {% elif run.status == 'partial' %}
+            <span class="badge badge-warning">Partielle</span>
+          {% elif run.status in ('running', 'pending') %}
+            <span class="badge badge-info">En cours</span>
+          {% else %}
+            <span class="badge badge-error">Erreur</span>
+          {% endif %}
+        </td>
+        <td>{{ run.snexi_raw }}</td>
+        <td>{{ run.constatimmo_raw }}</td>
+        <td>{{ run.events_kept }}</td>
+        <td class="text-success">{{ run.events_created }}</td>
+        <td>{{ run.events_updated }}</td>
+        <td class="text-muted">{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}—{% endif %}</td>
+        <td>
+          <a href="{{ url_for('history.detail', run_id=run.id) }}" class="btn-link">Détail</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucune synchronisation effectuée pour le moment.</p>
+  {% endif %}
+</div>
+{% endblock %}
