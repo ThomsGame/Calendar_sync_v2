@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Configuration — Constatimmo{% endblock %}
+
+{% block content %}
+<div class="setup-container">
+  <div class="setup-steps">
+    <div class="setup-step done">1. Snexi ✓</div>
+    <div class="setup-step active">2. Constatimmo</div>
+    <div class="setup-step">3. Google</div>
+  </div>
+
+  <div class="card">
+    <h2>Accès Constatimmo</h2>
+    <p class="text-muted">Entrez vos identifiants du portail Constatimmo. Ils seront stockés de manière chiffrée.</p>
+
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" id="constatimmo-form">
+      <div class="form-group">
+        <label for="constatimmo_username">Identifiant Constatimmo</label>
+        <input type="text" id="constatimmo_username" name="constatimmo_username"
+               value="{{ creds.constatimmo_username or '' }}" required
+               placeholder="nom.prenom@exemple.com" />
+      </div>
+      <div class="form-group">
+        <label for="constatimmo_password">Mot de passe Constatimmo</label>
+        <input type="password" id="constatimmo_password" name="constatimmo_password" required
+               placeholder="{% if creds.constatimmo_password_enc %}Mot de passe déjà enregistré — laisser vide pour conserver{% else %}Votre mot de passe{% endif %}" />
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="btn-test-cst" class="btn btn-secondary">
+          Tester la connexion
+        </button>
+        <div id="test-result" class="test-result hidden"></div>
+      </div>
+
+      <div class="form-actions form-actions-right">
+        <a href="{{ url_for('setup.step1_snexi') }}" class="btn btn-link">← Retour</a>
+        <a href="{{ url_for('setup.step3_google') }}" class="btn btn-link">Passer</a>
+        <button type="submit" class="btn btn-primary">Suivant →</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('btn-test-cst').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-test-cst');
+  const result = document.getElementById('test-result');
+  const username = document.getElementById('constatimmo_username').value;
+  const password = document.getElementById('constatimmo_password').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Test en cours...';
+  result.className = 'test-result';
+  result.textContent = '';
+
+  try {
+    const fd = new FormData();
+    fd.append('constatimmo_username', username);
+    fd.append('constatimmo_password', password);
+    const resp = await fetch('{{ url_for("setup.test_constatimmo") }}', { method: 'POST', body: fd });
+    const data = await resp.json();
+    result.textContent = data.message;
+    result.classList.add(data.ok ? 'test-ok' : 'test-error');
+    result.classList.remove('hidden');
+  } catch (e) {
+    result.textContent = 'Erreur réseau.';
+    result.classList.add('test-error');
+    result.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Tester la connexion';
+  }
+});
+</script>
+{% endblock %}
