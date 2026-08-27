@@ -17,6 +17,13 @@ dependencies = [
     "google-auth-oauthlib>=1.2.0",
     "httpx>=0.25.0",
     "loguru>=0.7.0",
+    # Dashboard
+    "flask>=3.0.0",
+    "flask-login>=0.6.3",
+    "sqlalchemy>=2.0.0",
+    "bcrypt>=4.1.0",
+    "cryptography>=42.0.0",
+    "apscheduler>=3.10.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +36,7 @@ dev = [
 
 [project.scripts]
 calendar-sync = "calendar_sync.main:main"
+calendar-dashboard = "dashboard:create_app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
