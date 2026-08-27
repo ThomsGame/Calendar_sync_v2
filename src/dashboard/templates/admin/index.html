@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Admin — Vue globale{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>&#128272; Administration</h1>
+</div>
+
+<!-- Global stats -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Utilisateurs</div>
+    <div class="stat-value stat-number">{{ users|length }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Syncs totales</div>
+    <div class="stat-value stat-number">{{ total_runs }}</div>
+  </div>
+  <div class="stat-card {% if error_runs > 0 %}stat-card-warn{% endif %}">
+    <div class="stat-label">Erreurs</div>
+    <div class="stat-value stat-number">{{ error_runs }}</div>
+  </div>
+  <div class="stat-card {% if running_runs > 0 %}stat-card-info{% endif %}">
+    <div class="stat-label">En cours</div>
+    <div class="stat-value stat-number">{{ running_runs }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Événements créés (total)</div>
+    <div class="stat-value stat-number">{{ total_events }}</div>
+  </div>
+</div>
+
+<!-- Users table -->
+<div class="card">
+  <h3>Utilisateurs</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Email</th>
+        <th>Rôle</th>
+        <th>Setup</th>
+        <th>Actif</th>
+        <th>Inscrit le</th>
+        <th>Dernière sync</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for user in users %}
+      <tr>
+        <td>{{ user.email }}</td>
+        <td>{% if user.is_admin %}<span class="badge badge-warning">Admin</span>{% else %}<span class="badge badge-neutral">User</span>{% endif %}</td>
+        <td>{% if user.setup_complete %}<span class="badge badge-success">✓</span>{% else %}<span class="badge badge-error">✗</span>{% endif %}</td>
+        <td>{% if user.is_active %}<span class="badge badge-success">✓</span>{% else %}<span class="badge badge-error">✗</span>{% endif %}</td>
+        <td>{{ user.created_at.strftime('%d/%m/%Y') }}</td>
+        <td>
+          {% set last = user.sync_runs[0] if user.sync_runs else none %}
+          {% if last %}
+            {{ last.started_at.strftime('%d/%m/%Y %H:%M') }}
+            {% if last.status == 'success' %}<span class="badge badge-success">OK</span>
+            {% elif last.status == 'error' %}<span class="badge badge-error">Err</span>
+            {% elif last.status in ('running','pending') %}<span class="badge badge-info">…</span>
+            {% else %}<span class="badge badge-warning">~</span>{% endif %}
+          {% else %}
+            <span class="text-muted">Jamais</span>
+          {% endif %}
+        </td>
+        <td>
+          <a href="{{ url_for('admin.user_detail', user_id=user.id) }}" class="btn-link">Détail</a>
+          <form method="post" action="{{ url_for('admin.admin_trigger_sync', user_id=user.id) }}"
+                style="display:inline;" onsubmit="return confirm('Lancer une sync pour cet utilisateur ?')">
+            <button type="submit" class="btn btn-sm btn-secondary">Sync</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Recent errors -->
+{% if recent_errors %}
+<div class="card">
+  <h3>Erreurs récentes</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Utilisateur</th>
+        <th>Erreur</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in recent_errors %}
+      <tr>
+        <td>{{ run.started_at.strftime('%d/%m/%Y %H:%M') }}</td>
+        <td>{{ run.user.email }}</td>
+        <td class="text-ellipsis text-error" title="{{ run.error_message or '' }}">
+          {{ (run.error_message or '')[:100] }}
+        </td>
+        <td><a href="{{ url_for('admin.run_detail', run_id=run.id) }}" class="btn-link">Voir</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
