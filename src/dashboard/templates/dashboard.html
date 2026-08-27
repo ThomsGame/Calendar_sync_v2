@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}Tableau de bord{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Tableau de bord</h1>
+  <button id="btn-sync" class="btn btn-primary" onclick="triggerSync()">
+    &#128260; Synchroniser maintenant
+  </button>
+</div>
+
+<!-- Sync status banner (shown while running) -->
+<div id="sync-banner" class="sync-banner hidden">
+  <div class="spinner"></div>
+  <span id="sync-banner-text">Synchronisation en cours...</span>
+</div>
+
+<!-- Stats cards -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-label">Dernière sync</div>
+    <div class="stat-value">
+      {% if last_run %}
+        {% if last_run.status == 'success' %}
+          <span class="badge badge-success">OK</span>
+        {% elif last_run.status == 'partial' %}
+          <span class="badge badge-warning">Partielle</span>
+        {% elif last_run.status in ('running', 'pending') %}
+          <span class="badge badge-info">En cours</span>
+        {% else %}
+          <span class="badge badge-error">Erreur</span>
+        {% endif %}
+        <small class="text-muted">{{ last_run.started_at.strftime('%d/%m/%Y %H:%M') }}</small>
+      {% else %}
+        <span class="text-muted">Jamais</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-label">Événements ajoutés (total)</div>
+    <div class="stat-value stat-number">{{ total_events }}</div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-label">Syncs effectuées</div>
+    <div class="stat-value stat-number">{{ total_runs }}</div>
+  </div>
+
+  <div class="stat-card {% if error_runs > 0 %}stat-card-warn{% endif %}">
+    <div class="stat-label">Erreurs</div>
+    <div class="stat-value stat-number">{{ error_runs }}</div>
+  </div>
+</div>
+
+<!-- Last run detail -->
+{% if last_run and last_run.status not in ('running', 'pending') %}
+<div class="card">
+  <h3>Dernière synchronisation — {{ last_run.started_at.strftime('%d/%m/%Y à %H:%M') }}</h3>
+  <div class="run-stats">
+    <span class="run-stat"><strong>Snexi</strong> {{ last_run.snexi_raw }} événements bruts</span>
+    <span class="run-stat"><strong>Constatimmo</strong> {{ last_run.constatimmo_raw }} événements bruts</span>
+    <span class="run-stat"><strong>Conservés</strong> {{ last_run.events_kept }}</span>
+    <span class="run-stat text-success"><strong>Créés</strong> {{ last_run.events_created }}</span>
+    <span class="run-stat"><strong>Mis à jour</strong> {{ last_run.events_updated }}</span>
+    <span class="run-stat text-muted"><strong>Ignorés</strong> {{ last_run.events_skipped }}</span>
+    {% if last_run.duration_seconds is not none %}
+    <span class="run-stat text-muted"><strong>Durée</strong> {{ last_run.duration_seconds }}s</span>
+    {% endif %}
+  </div>
+  {% if last_run.error_message %}
+  <div class="alert alert-error" style="margin-top:1rem;">
+    <strong>Erreur :</strong> {{ last_run.error_message[:300] }}
+    {% if last_run.error_message|length > 300 %}…{% endif %}
+    <a href="{{ url_for('history.detail', run_id=last_run.id) }}" class="btn-link">Voir le détail</a>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- Recent events -->
+<div class="card">
+  <div class="card-header">
+    <h3>Activité récente</h3>
+    <a href="{{ url_for('history.index') }}" class="btn-link">Voir tout →</a>
+  </div>
+
+  {% if recent_events %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Heure</th>
+        <th>Type</th>
+        <th>Source</th>
+        <th>Résumé</th>
+        <th>Adresse</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for evt in recent_events %}
+      <tr>
+        <td>{{ evt.date or '—' }}</td>
+        <td>{{ evt.start_time or '—' }}{% if evt.end_time %} – {{ evt.end_time }}{% endif %}</td>
+        <td>
+          {% if evt.event_type == 'entree' %}
+            <span class="badge badge-blue">Entrée</span>
+          {% elif evt.event_type == 'sortie' %}
+            <span class="badge badge-green">Sortie</span>
+          {% elif evt.event_type == 'odm' %}
+            <span class="badge badge-purple">ODM</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="source-badge source-{{ evt.source }}">{{ evt.source | capitalize }}</span>
+        </td>
+        <td class="text-ellipsis" title="{{ evt.summary or '' }}">{{ (evt.summary or '')[:50] }}</td>
+        <td class="text-ellipsis" title="{{ evt.address or '' }}">{{ (evt.address or '')[:40] or '—' }}</td>
+        <td>
+          {% if evt.action == 'created' %}
+            <span class="badge badge-success">Créé</span>
+          {% elif evt.action == 'updated' %}
+            <span class="badge badge-info">Mis à jour</span>
+          {% else %}
+            <span class="badge badge-neutral">Ignoré</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">Aucun événement synchronisé pour le moment. Lancez une synchronisation !</p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const syncBtn = document.getElementById('btn-sync');
+const syncBanner = document.getElementById('sync-banner');
+const syncBannerText = document.getElementById('sync-banner-text');
+
+{% if running_run %}
+// Already running on page load — show banner and poll
+showRunning();
+pollStatus();
+{% endif %}
+
+async function triggerSync() {
+  syncBtn.disabled = true;
+  syncBtn.textContent = 'Lancement...';
+
+  try {
+    const resp = await fetch('{{ url_for("dashboard.trigger_sync") }}', { method: 'POST' });
+    const data = await resp.json();
+
+    if (data.ok) {
+      showRunning();
+      pollStatus();
+    } else {
+      alert(data.message);
+      syncBtn.disabled = false;
+      syncBtn.textContent = '↻ Synchroniser maintenant';
+    }
+  } catch (e) {
+    alert('Erreur réseau. Réessayez.');
+    syncBtn.disabled = false;
+    syncBtn.textContent = '↻ Synchroniser maintenant';
+  }
+}
+
+function showRunning() {
+  syncBanner.classList.remove('hidden');
+  syncBtn.disabled = true;
+  syncBtn.textContent = 'En cours...';
+}
+
+function pollStatus() {
+  const interval = setInterval(async () => {
+    try {
+      const resp = await fetch('{{ url_for("dashboard.sync_status") }}');
+      const data = await resp.json();
+
+      if (!data.status || data.status === 'none') return;
+
+      if (!['running', 'pending'].includes(data.status)) {
+        clearInterval(interval);
+        // Reload page to show updated stats
+        window.location.reload();
+      } else {
+        const created = data.events_created || 0;
+        const updated = data.events_updated || 0;
+        syncBannerText.textContent = `Synchronisation en cours… ${created} créés, ${updated} mis à jour`;
+      }
+    } catch (e) {
+      // ignore transient errors
+    }
+  }, 3000);
+}
+</script>
+{% endblock %}
