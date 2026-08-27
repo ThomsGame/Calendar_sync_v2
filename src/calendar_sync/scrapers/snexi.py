@@ -170,12 +170,11 @@ async def login_snexi(page: Page, settings: Settings) -> list[Appointment]:
             if not user_el or not pass_el:
                 continue
             visible = await page.evaluate(
-                """(u, p) => {
+                """([u, p]) => {
                     const isVisible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
                     return isVisible(u) && isVisible(p);
                 }""",
-                user_el,
-                pass_el,
+                [user_el, pass_el],
             )
             if visible:
                 selectors = pair
