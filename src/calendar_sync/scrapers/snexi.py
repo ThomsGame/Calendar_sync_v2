@@ -416,6 +416,348 @@ async def extract_appointments(cal_frame: Frame) -> list[Appointment]:
     return all_appointments
 
 
+# ---------------------------------------------------------------------------
+# Roadmap-based detail enrichment (replaces the broken calendar-click approach)
+# ---------------------------------------------------------------------------
+#
+# How Snexi works:
+#   - The calendar iframe shows events colour-coded but contains no address/tenant data.
+#   - The "Feuille de route" (roadmap) is a day-by-day schedule that lists every OS
+#     with its address, service type, and agency in a plain HTML grid.
+#   - Clicking a grid row loads the full OS detail form in the same page (Ext JS SPA).
+#     The form fields have stable `name` attributes (nomLocataire, digicode, adresse, …).
+#   - The roadmap can be navigated to any date by setting the date picker input.
+#
+# Strategy:
+#   1. Navigate to "Feuille de route".
+#   2. For each unique appointment date in the calendar data, set the roadmap date
+#      and read the grid rows → address is available directly in the table.
+#   3. For each OS row, click the row to load the detail form, then read named inputs
+#      to get tenant name, phone, digicode, floor, door, etc.
+
+_ROADMAP_READ_FIELDS_JS = """() => {
+    const val = (name) => {
+        const els = Array.from(document.querySelectorAll('[name="' + name + '"]'));
+        for (const el of els) {
+            const v = (el.value || el.getAttribute('value') || '').replace(/\\u00a0/g, ' ').trim();
+            if (v && v !== 'Non renseigné') return v;
+        }
+        return '';
+    };
+    const rdv = val('textfield-1114-inputEl') || (() => {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const el = inputs.find(i => /\\d{2}\\/\\d{2}\\/\\d{4}.*\\d{2}:\\d{2}/.test(i.value || ''));
+        return el ? el.value : '';
+    })();
+    return {
+        nomLocataire: val('nomLocataire'),
+        portable:     val('contact_telephone_portable'),
+        fixe:         val('contact_telephone_fixe'),
+        mail:         val('mailLocataire'),
+        adresse:      val('adresse'),
+        complement:   val('complementAdresse'),
+        cp:           val('cp'),
+        ville:        val('ville'),
+        digicode:     val('digicode'),
+        residence:    val('residence'),
+        batiment:     val('batiment'),
+        etage:        val('etage'),
+        escalier:     val('escalier'),
+        porte:        val('porte'),
+        clePrend:     val('cle_prendre'),
+        cleRend:      val('cle_rendre'),
+        rdvDatetime:  rdv,
+    };
+}"""
+
+_ROADMAP_GET_ROWS_JS = """() => {
+    // Each roadmap row has 7 <td>: letter, timeFrom, timeTo, address, service, agency, osNum
+    const rows = Array.from(document.querySelectorAll('tr')).filter(r => {
+        const cells = r.querySelectorAll('td');
+        if (cells.length < 6) return false;
+        return /^\\d{7}$/.test((cells[cells.length - 1].innerText || '').trim());
+    });
+    return rows.map((r, idx) => {
+        const cells = Array.from(r.querySelectorAll('td'));
+        return {
+            idx,
+            letter:   (cells[0] ? cells[0].innerText : '').trim(),
+            timeFrom: (cells[1] ? cells[1].innerText : '').trim(),
+            timeTo:   (cells[2] ? cells[2].innerText : '').trim(),
+            address:  (cells[3] ? cells[3].innerText : '').replace(/\\u00a0/g, ' ').trim(),
+            service:  (cells[4] ? cells[4].innerText : '').trim(),
+            agency:   (cells[5] ? cells[5].innerText : '').trim(),
+            osNum:    (cells[6] ? cells[6].innerText : '').trim(),
+        };
+    });
+}"""
+
+
+async def _navigate_roadmap(page) -> bool:
+    """Navigate to 'Feuille de route' in the Snexi portal."""
+    clicked = await page.evaluate("""() => {
+        const links = Array.from(document.querySelectorAll('a.lien_menu, a'));
+        const target = links.find(a =>
+            (a.innerText || a.textContent || '').trim().toLowerCase().includes('feuille de route'));
+        if (!target) return false;
+        target.click();
+        return true;
+    }""")
+    if clicked:
+        await page.wait_for_timeout(3000)
+    return clicked
+
+
+async def _set_roadmap_date(page, date_iso: str) -> bool:
+    """Set the roadmap date picker to a given date (YYYY-MM-DD) and reload the grid.
+
+    Snexi uses an Ext JS date picker with a component ID of 'date_roadmap'.
+    The most reliable way to change the date is via the Ext JS component API
+    (Ext.getCmp('date_roadmap').setValue(...)) which triggers the store reload
+    automatically.  Falls back to native DOM events if Ext is not available.
+    """
+    try:
+        yy, mm, dd = date_iso.split("-")
+    except ValueError:
+        return False
+
+    # JS month is 0-indexed
+    js_month = int(mm) - 1
+
+    result = await page.evaluate(f"""() => {{
+        const y = {int(yy)}, m = {js_month}, d = {int(dd)};
+
+        // Strategy 1: Ext JS component API (preferred — triggers grid reload)
+        try {{
+            if (typeof Ext !== 'undefined' && Ext.getCmp) {{
+                const comp = Ext.getCmp('date_roadmap');
+                if (comp && comp.setValue) {{
+                    comp.setValue(new Date(y, m, d));
+                    return {{method: 'extjs', newValue: comp.getRawValue ? comp.getRawValue() : '?'}};
+                }}
+            }}
+        }} catch(e) {{}}
+
+        // Strategy 2: find the input by name and fire events
+        const input = document.querySelector('input[name="date_roadmap"], input[id="date_roadmap-inputEl"]');
+        if (!input) return {{method: null, found: false}};
+
+        const dateStr = String(d).padStart(2,'0') + '/' + String(m+1).padStart(2,'0') + '/' + y;
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeSetter.call(input, dateStr);
+        input.dispatchEvent(new Event('input', {{bubbles: true}}));
+        input.dispatchEvent(new Event('change', {{bubbles: true}}));
+        input.blur();
+        return {{method: 'dom', newValue: input.value}};
+    }}""")
+
+    if not result or not result.get("method"):
+        return False
+
+    await page.wait_for_timeout(2500)
+    return True
+
+
+async def _click_roadmap_row(page, row_index: int) -> bool:
+    """Click a roadmap grid row by its sequential index among valid rows."""
+    clicked = await page.evaluate(f"""() => {{
+        const rows = Array.from(document.querySelectorAll('tr')).filter(r => {{
+            const cells = r.querySelectorAll('td');
+            if (cells.length < 6) return false;
+            return /^\\d{{7}}$/.test((cells[cells.length - 1].innerText || '').trim());
+        }});
+        const row = rows[{row_index}];
+        if (!row) return false;
+        row.click();
+        return true;
+    }}""")
+    return bool(clicked)
+
+
+async def _ensure_roadmap_visible(page) -> bool:
+    """Make sure the roadmap ('Feuille de route') panel is the active view.
+
+    The Ext JS SPA may switch views as the user navigates — after calendar
+    extraction the indisponibilités iframe is shown.  We need to navigate back
+    to the roadmap before changing the date or reading rows.
+    """
+    # Check if roadmap rows or the date picker are currently visible
+    roadmap_ready = await page.evaluate("""() => {
+        const input = document.querySelector('input[name="date_roadmap"], input[id="date_roadmap-inputEl"]');
+        if (!input) return false;
+        const r = input.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }""")
+    if roadmap_ready:
+        return True
+    # Navigate to feuille de route
+    return await _navigate_roadmap(page)
+
+
+async def _scrape_roadmap_for_date(page, date_iso: str) -> list[dict]:
+    """Navigate roadmap to date_iso and return all OS rows with full detail fields."""
+    # Ensure we are on the roadmap page before changing the date
+    await _ensure_roadmap_visible(page)
+
+    navigated = await _set_roadmap_date(page, date_iso)
+    if not navigated:
+        logger.debug(f"[ROADMAP] Could not set date to {date_iso}")
+
+    rows = await page.evaluate(_ROADMAP_GET_ROWS_JS)
+    if not rows:
+        logger.debug(f"[ROADMAP] No rows for {date_iso}")
+        return []
+
+    results = []
+    for row in rows:
+        idx = row["idx"]
+        os_num = row["osNum"]
+        clicked = await _click_roadmap_row(page, idx)
+        if clicked:
+            await page.wait_for_timeout(1200)
+        fields = await page.evaluate(_ROADMAP_READ_FIELDS_JS)
+        # Build full address from row (always available) + form detail fields
+        full_address = row["address"]
+        if fields.get("adresse"):
+            parts = [fields["adresse"]]
+            if fields.get("complement"):
+                parts.append(fields["complement"])
+            if fields.get("cp") and fields.get("ville"):
+                parts.append(f"{fields['cp']} {fields['ville']}")
+            elif fields.get("cp"):
+                parts.append(fields["cp"])
+            elif fields.get("ville"):
+                parts.append(fields["ville"])
+            constructed = ", ".join(p for p in parts if p)
+            if constructed:
+                full_address = constructed
+        results.append({
+            "osNum":    os_num,
+            "date":     date_iso,
+            "timeFrom": row["timeFrom"],
+            "timeTo":   row["timeTo"],
+            "service":  row["service"],
+            "agency":   row["agency"],
+            "address":  full_address,
+            "tenant":   fields.get("nomLocataire", ""),
+            "phone":    fields.get("portable", "") or fields.get("fixe", ""),
+            "mail":     fields.get("mail", ""),
+            "digicode": fields.get("digicode", ""),
+            "residence":fields.get("residence", ""),
+            "batiment": fields.get("batiment", ""),
+            "etage":    fields.get("etage", ""),
+            "escalier": fields.get("escalier", ""),
+            "porte":    fields.get("porte", ""),
+            "clePrend": fields.get("clePrend", ""),
+            "cleRend":  fields.get("cleRend", ""),
+        })
+        logger.debug(f"[ROADMAP] OS {os_num}: tenant={fields.get('nomLocataire','')!r}  "
+                     f"digicode={fields.get('digicode','')!r}  address={full_address!r}")
+
+    return results
+
+
+async def enrich_snexi_via_roadmap(
+    page,
+    events: list[Appointment],
+    settings: Settings,
+) -> list[Appointment]:
+    """Enrich Snexi appointments using the 'Feuille de route' roadmap.
+
+    For each unique date that has relevant OS events, navigate the roadmap to
+    that date and scrape all OS rows.  The roadmap provides address, agency,
+    tenant name, phone, digicode, floor, door, key-pickup info — all in one
+    structured page, no calendar-click tricks needed.
+    """
+    if not settings.snexi_enrich_details:
+        return events
+
+    snexi_events = [
+        e for e in events
+        if e.source == AppointmentSource.SNEXI and e.date
+    ]
+    if not snexi_events:
+        return events
+
+    # Collect unique dates that have OS numbers
+    import re as _re
+    dates_with_os: dict[str, list[Appointment]] = {}
+    for evt in snexi_events:
+        os_num = extract_os_number(f"{evt.text} {evt.description or ''}")
+        if not os_num:
+            continue
+        is_blue_green = evt.style and (
+            "rgb(18, 17, 171)" in evt.style or "rgb(17, 138, 123)" in evt.style
+        )
+        if not is_blue_green:
+            continue
+        if _re.search(r"indisponibilit[ée]|trajet", evt.text or "", _re.IGNORECASE):
+            continue
+        dates_with_os.setdefault(evt.date, []).append(evt)
+
+    if not dates_with_os:
+        logger.info("[ROADMAP] No blue/green OS events to enrich.")
+        return events
+
+    # Navigate to Feuille de route (initial navigation — _scrape_roadmap_for_date
+    # calls _ensure_roadmap_visible before each date to handle any view switches)
+    await _navigate_roadmap(page)
+
+    # Scrape each date
+    details_by_os: dict[str, dict] = {}
+    unique_dates = sorted(dates_with_os.keys())
+    for date_iso in unique_dates:
+        logger.info(f"[ROADMAP] Scraping date {date_iso} ({len(dates_with_os[date_iso])} events)…")
+        rows = await _scrape_roadmap_for_date(page, date_iso)
+        for row in rows:
+            os_num = row["osNum"]
+            if os_num not in details_by_os or not details_by_os[os_num].get("tenant"):
+                details_by_os[os_num] = row
+        if rows:
+            logger.info(f"[ROADMAP] {date_iso}: {len(rows)} OS read ({[r['osNum'] for r in rows]})")
+        else:
+            logger.warning(f"[ROADMAP] {date_iso}: no rows found (date may not load in roadmap)")
+
+    if not details_by_os:
+        logger.warning("[ROADMAP] No detail data retrieved.")
+        return events
+
+    # Merge into events
+    enriched = []
+    for evt in events:
+        if evt.source != AppointmentSource.SNEXI:
+            enriched.append(evt)
+            continue
+        os_num = extract_os_number(f"{evt.text} {evt.description or ''}")
+        if not os_num or os_num not in details_by_os:
+            enriched.append(evt)
+            continue
+        d = details_by_os[os_num]
+        enriched.append(evt.model_copy(update={
+            "os_number":       os_num,
+            "address":         d.get("address") or evt.address,
+            "owner":           evt.owner,
+            "manager":         d.get("agency") or evt.manager,
+            "tenant":          d.get("tenant") or evt.tenant,
+            "tenant_mobile":   d.get("phone") or evt.tenant_mobile,
+            "comment":         evt.comment,
+            "key_pickup_place":d.get("clePrend") or evt.key_pickup_place,
+            "key_drop_place":  d.get("cleRend") or evt.key_drop_place,
+            "floor":           d.get("etage") or evt.floor,
+            "door":            d.get("porte") or evt.door,
+            "digicode":        d.get("digicode") or evt.digicode,
+            "building":        d.get("batiment") or evt.building,
+        }))
+
+    enriched_count = sum(
+        1 for e in enriched
+        if e.source == AppointmentSource.SNEXI
+        and (e.address or e.tenant or e.digicode or e.floor)
+    )
+    logger.info(f"[ROADMAP] Enrichment complete — {enriched_count}/{len(snexi_events)} Snexi events have detail data.")
+    return enriched
+
+
 async def extract_snexi_detail_fields(context, detail_url: str, os_number: str) -> dict:
     """Extract detail fields from Snexi OS detail panel via page.evaluate."""
     extracted = await context.evaluate(
@@ -726,91 +1068,12 @@ async def _click_retour(page: Page) -> bool:
         return False
 
 
-async def enrich_snexi_appointments(page: Page, events: list[Appointment], settings: Settings) -> list[Appointment]:
-    """Enrich all Snexi blue/green events with detail fields from detail panels."""
-    if not settings.snexi_enrich_details:
-        return events
+async def enrich_snexi_appointments(
+    page: Page, events: list[Appointment], settings: Settings
+) -> list[Appointment]:
+    """Enrich Snexi events with detail data using the roadmap (Feuille de route).
 
-    snexi_events = [e for e in events if e.source == AppointmentSource.SNEXI]
-    if not snexi_events:
-        return events
-
-    # Find events that have OS numbers and are blue/green (entree/sortie)
-    targets = []
-    seen_keys: set[str] = set()
-
-    for evt in snexi_events:
-        os_num = extract_os_number(f"{evt.text} {evt.description or ''}")
-        if not os_num:
-            continue
-        is_blue_green = evt.style and (
-            "rgb(18, 17, 171)" in evt.style
-            or "rgb(17, 138, 123)" in evt.style
-        )
-        is_indispo = bool(re.search(r"indisponibilit[ée]", evt.text or "", re.IGNORECASE))
-        has_os = bool(re.search(r"\bos\s*n[°º]?\s*\d{5,}", f"{evt.text} {evt.description or ''}", re.IGNORECASE))
-        is_trajet = bool(re.search(r"\btrajet\b", evt.text or "", re.IGNORECASE))
-
-        if not is_blue_green or is_indispo or not has_os or is_trajet:
-            continue
-
-        key = f"{evt.date or 'nodate'}|{evt.start_time or 'notime'}|{os_num}"
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-        targets.append((evt, os_num, key))
-
-    targets.sort(key=lambda t: f"{t[0].date or ''} {t[0].start_time or ''}")
-
-    if not targets:
-        return events
-
-    details_by_os: dict[str, dict] = {}
-    for i, (target, os_num, key) in enumerate(targets, 1):
-        try:
-            logger.info(f"[SNEXI][DETAIL] Click OS {os_num} ({target.date} {target.start_time})")
-            fields = await enrich_snexi_os_from_agenda(page, target)
-            if not fields:
-                logger.warning(f"[SNEXI][DETAIL] OS {os_num}: inline panel not found.")
-                continue
-            score = count_filled_fields(fields)
-            if score > 0:
-                existing = details_by_os.get(os_num)
-                if not existing or count_filled_fields(existing) < score:
-                    details_by_os[os_num] = fields
-            if i % 5 == 0 or i == len(targets):
-                logger.info(f"[SNEXI][DETAIL] {i}/{len(targets)} blue/green appointments clicked.")
-        except Exception as e:
-            logger.warning(f"[SNEXI][DETAIL] OS {os_num}: enrichment failed ({e}).")
-
-    if not details_by_os:
-        return events
-
-    enriched = []
-    for evt in events:
-        if evt.source != AppointmentSource.SNEXI:
-            enriched.append(evt)
-            continue
-        os_num = extract_os_number(f"{evt.text} {evt.description or ''}")
-        if not os_num or os_num not in details_by_os:
-            enriched.append(evt)
-            continue
-        fields = details_by_os[os_num]
-        enriched.append(evt.model_copy(update={
-            "os_number": os_num,
-            "detail_url": fields.get("detailUrl") or evt.detail_url,
-            "address": fields.get("address") or evt.address,
-            "owner": fields.get("owner") or evt.owner,
-            "manager": fields.get("manager") or evt.manager,
-            "tenant": fields.get("tenant") or evt.tenant,
-            "tenant_mobile": fields.get("tenantMobile") or evt.tenant_mobile,
-            "comment": fields.get("comment") or evt.comment,
-            "key_pickup_place": fields.get("keyPickupPlace") or evt.key_pickup_place,
-            "key_drop_place": fields.get("keyDropPlace") or evt.key_drop_place,
-            "floor": fields.get("floor") or evt.floor,
-            "door": fields.get("door") or evt.door,
-            "digicode": fields.get("digicode") or evt.digicode,
-            "building": fields.get("building") or evt.building,
-        }))
-
-    return enriched
+    Delegates to enrich_snexi_via_roadmap which uses the structured roadmap
+    table rather than trying to click events in the calendar iframe.
+    """
+    return await enrich_snexi_via_roadmap(page, events, settings)
