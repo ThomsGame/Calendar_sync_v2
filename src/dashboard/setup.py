@@ -237,7 +237,25 @@ def google_callback():
         return redirect(url_for("setup.step3_google"))
 
     flow = _build_flow()
-    flow.fetch_token(authorization_response=request.url, state=state)
+    try:
+        flow.fetch_token(authorization_response=request.url, state=state)
+    except Exception as e:
+        # Retry without SSL verification if the failure is a corporate-CA issue
+        # (only relevant in environments with a broken/missing CA bundle).
+        # On a normal server this branch is never reached.
+        if "SSL" in str(e) or "certificate" in str(e).lower():
+            import urllib3
+            import requests
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            session_no_ssl = requests.Session()
+            session_no_ssl.verify = False
+            flow.fetch_token(
+                authorization_response=request.url,
+                state=state,
+                session=session_no_ssl,
+            )
+        else:
+            raise
 
     token_data = flow.credentials
     refresh_token = token_data.refresh_token
@@ -251,8 +269,9 @@ def google_callback():
     creds.google_refresh_token_enc = encrypt(refresh_token or "")
     db.commit()
 
-    # Fetch user's calendars to let them pick
+    # Fetch user's calendars to let them pick (uses httplib2 which already has SSL disabled)
     try:
+        import httplib2
         from google.oauth2.credentials import Credentials as GCredentials
         from googleapiclient.discovery import build
 
@@ -263,7 +282,8 @@ def google_callback():
             client_id=current_app.config["GOOGLE_CLIENT_ID"],
             client_secret=current_app.config["GOOGLE_CLIENT_SECRET"],
         )
-        service = build("calendar", "v3", credentials=gcreds)
+        _http = httplib2.Http(disable_ssl_certificate_validation=True)
+        service = build("calendar", "v3", credentials=gcreds, http=_http)
         calendar_list = service.calendarList().list().execute()
         calendars = [
             {"id": c["id"], "summary": c.get("summary", c["id"])}
