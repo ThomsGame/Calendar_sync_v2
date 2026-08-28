@@ -204,6 +204,45 @@ def step3_google():
     )
 
 
+def _sign_state(user_id: int, raw_state: str) -> str:
+    """Embed user_id into the OAuth state so it survives across IP changes.
+
+    Format: "<user_id>:<raw_state>" signed with the app secret key via HMAC.
+    This means we never depend on the Flask session cookie surviving the
+    Google redirect (which breaks when the browser hits localhost but the
+    server was reached via LAN IP).
+    """
+    import hashlib
+    import hmac
+    secret = current_app.config["SECRET_KEY"]
+    if isinstance(secret, str):
+        secret = secret.encode()
+    payload = f"{user_id}:{raw_state}"
+    sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{user_id}.{raw_state}.{sig}"
+
+
+def _verify_state(signed_state: str) -> tuple[int | None, str | None]:
+    """Decode and verify a signed state string. Returns (user_id, raw_state) or (None, None)."""
+    import hashlib
+    import hmac
+    try:
+        parts = signed_state.split(".", 2)
+        if len(parts) != 3:
+            return None, None
+        user_id_str, raw_state, sig = parts
+        secret = current_app.config["SECRET_KEY"]
+        if isinstance(secret, str):
+            secret = secret.encode()
+        payload = f"{user_id_str}:{raw_state}"
+        expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()[:16]
+        if not hmac.compare_digest(sig, expected):
+            return None, None
+        return int(user_id_str), raw_state
+    except Exception:
+        return None, None
+
+
 @bp.route("/google/auth")
 @login_required
 def google_auth():
@@ -212,13 +251,30 @@ def google_auth():
         flash("Google OAuth non configuré sur ce serveur.", "danger")
         return redirect(url_for("setup.step3_google"))
 
+    import secrets as _secrets
     flow = _build_flow()
-    auth_url, state = flow.authorization_url(
+
+    # Generate PKCE code verifier + challenge so Google accepts the exchange
+    # (required when Google Cloud project has PKCE enforced on the OAuth client)
+    code_verifier = _secrets.token_urlsafe(64)
+    import hashlib, base64
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+    raw_state = _secrets.token_urlsafe(24)
+    signed = _sign_state(current_user.id, raw_state)
+
+    auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="consent",
+        state=signed,
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
     )
-    session["oauth_state"] = state
+
+    # Store verifier in session (same host, so session is fine for this leg)
+    session["oauth_code_verifier"] = code_verifier
+    session["oauth_state"] = signed   # also keep for fallback validation
     session["oauth_user_id"] = current_user.id
     return redirect(auth_url)
 
@@ -229,30 +285,44 @@ def google_callback():
     import os as _os
     _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # allow http://localhost redirect
 
-    state = session.pop("oauth_state", None)
-    user_id = session.pop("oauth_user_id", None)
+    returned_state = request.args.get("state", "")
 
-    if not state or not user_id:
+    # Primary: decode user_id from the signed state (works even if session cookie
+    # was lost because the browser was redirected through a different host/IP)
+    user_id, raw_state = _verify_state(returned_state)
+
+    # Fallback: session (works when same host throughout)
+    if user_id is None:
+        user_id = session.pop("oauth_user_id", None)
+        session.pop("oauth_state", None)
+
+    if not user_id:
         flash("Session OAuth invalide. Recommencez.", "danger")
         return redirect(url_for("setup.step3_google"))
 
+    # Retrieve PKCE verifier — try session first, then skip if absent
+    code_verifier = session.pop("oauth_code_verifier", None)
+
     flow = _build_flow()
     try:
-        flow.fetch_token(authorization_response=request.url, state=state)
+        flow.fetch_token(
+            authorization_response=request.url,
+            state=returned_state,
+            code_verifier=code_verifier,  # None is safe — omits the parameter
+        )
     except Exception as e:
-        # Retry without SSL verification if the failure is a corporate-CA issue
-        # (only relevant in environments with a broken/missing CA bundle).
-        # On a normal server this branch is never reached.
-        if "SSL" in str(e) or "certificate" in str(e).lower():
-            import urllib3
-            import requests
+        err = str(e)
+        if "SSL" in err or "certificate" in err.lower():
+            # Retry without SSL verification (corporate CA environment only)
+            import urllib3, requests as _req
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            session_no_ssl = requests.Session()
-            session_no_ssl.verify = False
+            _s = _req.Session()
+            _s.verify = False
             flow.fetch_token(
                 authorization_response=request.url,
-                state=state,
-                session=session_no_ssl,
+                state=returned_state,
+                code_verifier=code_verifier,
+                session=_s,
             )
         else:
             raise
