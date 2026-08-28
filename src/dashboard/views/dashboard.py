@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from flask import Blueprint, flash, jsonify, redirect, render_template, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, url_for
 from flask_login import current_user, login_required
 
 from dashboard import get_db
@@ -78,10 +78,19 @@ def trigger_sync():
         return jsonify({"ok": False, "message": "Une synchronisation est déjà en cours.", "run_id": running.id})
 
     user_id = current_user.id
+    # Capture app config values now, while still in the request context.
+    # The background thread has no Flask app context so current_app is unavailable there.
+    google_client_id = current_app.config.get("GOOGLE_CLIENT_ID", "")
+    google_client_secret = current_app.config.get("GOOGLE_CLIENT_SECRET", "")
 
     def _run():
         from dashboard.sync_runner import run_sync_for_user
-        run_sync_for_user(user_id, trigger="manual")
+        run_sync_for_user(
+            user_id,
+            trigger="manual",
+            google_client_id=google_client_id,
+            google_client_secret=google_client_secret,
+        )
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

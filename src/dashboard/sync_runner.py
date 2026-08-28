@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -23,10 +24,22 @@ from dashboard.crypto import decrypt
 from dashboard.models import SyncEvent, SyncRun, User, UserCredentials
 
 
-def _build_settings(creds: UserCredentials) -> Settings:
-    """Construct a Settings object from decrypted database credentials."""
-    from dashboard import get_db
-    from flask import current_app
+def _build_settings(
+    creds: UserCredentials,
+    google_client_id: str = "",
+    google_client_secret: str = "",
+) -> Settings:
+    """Construct a Settings object from decrypted database credentials.
+
+    google_client_id / google_client_secret must be passed explicitly because
+    this function is called from background threads that have no Flask app
+    context (current_app is unavailable there).
+    """
+    # Fall back to env vars if not passed (e.g. called from scheduler)
+    if not google_client_id:
+        google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    if not google_client_secret:
+        google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
 
     return Settings(
         snexi_url="https://snexi.fr/portail",
@@ -39,14 +52,12 @@ def _build_settings(creds: UserCredentials) -> Settings:
         google_calendar_id=creds.google_calendar_os_id or "primary",
         google_calendar_os_id=creds.google_calendar_os_id or "",
         google_calendar_odm_id=creds.google_calendar_odm_id or "",
-        # Pass the stored refresh token so google_calendar.py bypasses token.json
-        google_oauth_client_id=current_app.config.get("GOOGLE_CLIENT_ID", ""),
-        google_oauth_client_secret=current_app.config.get("GOOGLE_CLIENT_SECRET", ""),
+        google_oauth_client_id=google_client_id,
+        google_oauth_client_secret=google_client_secret,
         google_refresh_token=decrypt(creds.google_refresh_token_enc or ""),
         snexi_enrich_details=creds.snexi_enrich_details,
         constatimmo_enrich_details=creds.constatimmo_enrich_details,
         dry_run=creds.dry_run,
-        # Gmail draft settings
         gmail_drafts_enabled=creds.gmail_drafts_enabled,
         constatimmo_contact_email=creds.constatimmo_contact_email or "",
         snexi_contact_email=creds.snexi_contact_email or "",
@@ -213,12 +224,22 @@ async def _sync_with_counts(
     return created, updated, skipped, newly_created
 
 
-def run_sync_for_user(user_id: int, trigger: str = "manual") -> Optional[int]:
+def run_sync_for_user(
+    user_id: int,
+    trigger: str = "manual",
+    google_client_id: str = "",
+    google_client_secret: str = "",
+) -> Optional[int]:
     """
     Entry point called from Flask routes or the scheduler.
 
     Creates a SyncRun record, runs the async pipeline, updates the record.
     Returns the run_id, or None if the user has no credentials.
+
+    google_client_id / google_client_secret should be passed explicitly when
+    called from a Flask route (read from current_app.config before spawning
+    the thread). When called from the scheduler they default to "" and
+    _build_settings falls back to environment variables.
     """
     db = get_db()
 
@@ -232,7 +253,7 @@ def run_sync_for_user(user_id: int, trigger: str = "manual") -> Optional[int]:
         logger.warning(f"[SYNC] User {user_id} has no credentials configured.")
         return None
 
-    settings = _build_settings(creds)
+    settings = _build_settings(creds, google_client_id=google_client_id, google_client_secret=google_client_secret)
 
     # Create run record
     run = SyncRun(user_id=user_id, trigger=trigger, status="running", started_at=datetime.now())
