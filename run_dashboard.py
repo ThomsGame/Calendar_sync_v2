@@ -52,6 +52,19 @@ for dashboard_key, cli_key in _BRIDGE.items():
         os.environ[dashboard_key] = os.environ[cli_key]
         print(f"[CONFIG] {dashboard_key} sourced from {cli_key} (.env)")
 
+# 4. Validate DASHBOARD_SECRET_KEY early — generate one if missing/invalid.
+#    crypto.get_fernet() does this lazily, but doing it here gives a clear
+#    startup message before any request hits.
+def _ensure_secret_key() -> None:
+    from dashboard.crypto import get_fernet
+    try:
+        get_fernet()  # triggers auto-generation + persistence if needed
+        print("[CONFIG] DASHBOARD_SECRET_KEY OK")
+    except Exception as e:
+        print(f"[CONFIG] DASHBOARD_SECRET_KEY error: {e}")
+
+_ensure_secret_key()
+
 from dashboard import create_app
 
 app = create_app()
