@@ -22,7 +22,8 @@ from calendar_sync.models.appointment import Appointment, AppointmentSource
 from calendar_sync.scrapers.base import BrowserManager
 from calendar_sync.scrapers.constatimmo import login_constatimmo
 from calendar_sync.scrapers.snexi import enrich_snexi_appointments, login_snexi
-from calendar_sync.sync.google_calendar import sync_to_google_calendar
+from calendar_sync.email import DraftRecipients, create_gmail_drafts
+from calendar_sync.sync.google_calendar import get_gmail_service, sync_to_google_calendar
 
 
 CACHE_FILE = Path("appointments.cache.json")
@@ -132,9 +133,43 @@ async def run_full_sync(dry_run_override: bool | None = None) -> None:
     # Sync to Google Calendar
     # -----------------------------------------------------------------------
     logger.info("[GOOGLE] Starting calendar sync...")
-    created, updated, skipped = await sync_to_google_calendar(business, settings)
+    created, updated, skipped, newly_created = await sync_to_google_calendar(business, settings)
     logger.info("=" * 60)
-    logger.info(f"Sync complete — Created: {created} | Updated: {updated} | Skipped: {skipped}")
+    logger.info(f"[GOOGLE] Sync complete — Created: {created} | Updated: {updated} | Skipped: {skipped}")
+
+    # -----------------------------------------------------------------------
+    # Gmail drafts — one per newly created event, to the other platform
+    # -----------------------------------------------------------------------
+    if settings.gmail_drafts_enabled and newly_created and not settings.dry_run:
+        logger.info(f"[EMAIL] Creating Gmail drafts for {len(newly_created)} new event(s)...")
+        gmail = get_gmail_service(settings)
+        if gmail:
+            recipients = DraftRecipients(
+                snexi_contact=settings.snexi_contact_email or None,
+                constatimmo_contact=settings.constatimmo_contact_email or None,
+            )
+            results = create_gmail_drafts(
+                service=gmail,
+                appointments=newly_created,
+                recipients=recipients,
+                sender_name=settings.sender_name,
+                dry_run=False,
+            )
+            ok = sum(1 for r in results if r.ok)
+            failed = len(results) - ok
+            logger.info(f"[EMAIL] {ok} draft(s) created" + (f" | {failed} failed" if failed else ""))
+            for r in results:
+                if r.ok:
+                    logger.info(f"  → {r.recipient} | {r.subject[:60]}")
+                else:
+                    logger.warning(f"  ✗ {r.recipient} | {r.error}")
+        else:
+            logger.warning("[EMAIL] Gmail service unavailable — skipping drafts.")
+    elif settings.gmail_drafts_enabled and newly_created and settings.dry_run:
+        logger.info(f"[EMAIL] Dry run — would create {len(newly_created)} draft(s), skipping.")
+
+    logger.info("=" * 60)
+    logger.info("All done.")
     logger.info("=" * 60)
 
 
@@ -175,8 +210,25 @@ async def run_sync_only() -> None:
         sys.exit(1)
 
     logger.info(f"[SYNC-ONLY] Cache is {age_minutes} min old — {len(cached_events)} events.")
-    created, updated, skipped = await sync_to_google_calendar(cached_events, settings)
+    created, updated, skipped, newly_created = await sync_to_google_calendar(cached_events, settings)
     logger.info(f"[SYNC-ONLY] Done — Created: {created} | Updated: {updated} | Skipped: {skipped}")
+
+    if settings.gmail_drafts_enabled and newly_created and not settings.dry_run:
+        gmail = get_gmail_service(settings)
+        if gmail:
+            recipients = DraftRecipients(
+                snexi_contact=settings.snexi_contact_email or None,
+                constatimmo_contact=settings.constatimmo_contact_email or None,
+            )
+            results = create_gmail_drafts(
+                service=gmail,
+                appointments=newly_created,
+                recipients=recipients,
+                sender_name=settings.sender_name,
+                dry_run=False,
+            )
+            ok = sum(1 for r in results if r.ok)
+            logger.info(f"[EMAIL] {ok}/{len(results)} draft(s) created.")
 
 
 def main() -> None:

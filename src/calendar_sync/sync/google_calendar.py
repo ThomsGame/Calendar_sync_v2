@@ -24,10 +24,43 @@ from googleapiclient.discovery import build
 from loguru import logger
 
 # Corporate CA bundles in this environment have issues with Python's stricter SSL.
-# Google's endpoints are trusted; we disable verification for the httplib2 transport
-# used internally by google-api-python-client.
+# Google's endpoints are trusted; we disable verification for both transports:
+#   - httplib2: used by googleapiclient for API calls
+#   - requests: used by google-auth for token refresh
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "0")
 _HTTP = httplib2.Http(disable_ssl_certificate_validation=True)
+
+import ssl as _ssl
+import urllib3 as _urllib3
+_urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+
+def _no_ssl_request() -> "Request":
+    """Build a google.auth.transport.requests.Request that skips SSL verification.
+
+    google.auth's Request wrapper respects session.verify=False but only when
+    the underlying HTTPAdapter also uses a relaxed SSL context.  We mount a
+    custom adapter to ensure cert verification is disabled end-to-end.
+    """
+    import requests as _requests
+    from requests.adapters import HTTPAdapter as _HTTPAdapter
+    from urllib3.util.ssl_ import create_urllib3_context as _create_ctx
+
+    class _NoSSLAdapter(_HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            ctx = _create_ctx()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            kwargs["ssl_context"] = ctx
+            super().init_poolmanager(*args, **kwargs)
+
+        def send(self, request, **kwargs):
+            kwargs["verify"] = False
+            return super().send(request, **kwargs)
+
+    session = _requests.Session()
+    session.verify = False
+    session.mount("https://", _NoSSLAdapter())
+    return Request(session=session)
 
 from calendar_sync.config import Settings
 from calendar_sync.models.appointment import Appointment, EventMeta
@@ -64,14 +97,7 @@ def _load_or_refresh_credentials(settings: Settings) -> Optional[Credentials]:
 
     if creds and creds.expired and creds.refresh_token:
         try:
-            # Use requests with SSL disabled to work around corporate CA issues
-            import requests
-            session = requests.Session()
-            session.verify = False
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            from google.auth.transport.requests import Request as GRequest
-            creds.refresh(GRequest(session=session))
+            creds.refresh(_no_ssl_request())
             token_path.write_text(creds.to_json())
             logger.info("[GOOGLE] Token refreshed and saved.")
             return creds
@@ -138,14 +164,8 @@ def _credentials_from_refresh_token(settings: Settings) -> Optional[Credentials]
         client_secret=settings.google_oauth_client_secret,
         scopes=SCOPES,
     )
-    # Force a refresh to get a valid access token
     try:
-        import requests
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        session = requests.Session()
-        session.verify = False
-        creds.refresh(Request(session=session))
+        creds.refresh(_no_ssl_request())
         logger.info("[GOOGLE] Credentials refreshed from stored refresh token.")
         return creds
     except Exception as e:
@@ -162,12 +182,22 @@ def _get_credentials(settings: Settings) -> Optional[Credentials]:
     return _load_or_refresh_credentials(settings)
 
 
+def _authed_http(creds):
+    """Build an httplib2 transport authorized with credentials, SSL disabled."""
+    import google_auth_httplib2 as _ga_httplib2
+    import httplib2 as _httplib2
+    return _ga_httplib2.AuthorizedHttp(
+        creds,
+        http=_httplib2.Http(disable_ssl_certificate_validation=True),
+    )
+
+
 def get_google_service(settings: Settings):
     """Build and return an authenticated Google Calendar service."""
     creds = _get_credentials(settings)
     if not creds:
         return None
-    return build("calendar", "v3", credentials=creds, http=_HTTP)
+    return build("calendar", "v3", http=_authed_http(creds))
 
 
 def get_gmail_service(settings: Settings):
@@ -175,7 +205,7 @@ def get_gmail_service(settings: Settings):
     creds = _get_credentials(settings)
     if not creds:
         return None
-    return build("gmail", "v1", credentials=creds, http=_HTTP)
+    return build("gmail", "v1", http=_authed_http(creds))
 
 
 # ---------------------------------------------------------------------------
