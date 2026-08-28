@@ -6,6 +6,11 @@ import os
 
 import bcrypt
 from flask import Flask
+
+# Allow OAuth2 over HTTP for local development (localhost redirects).
+# oauthlib requires HTTPS by default; this env var disables that check.
+# Safe because localhost is not accessible from the internet.
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 from flask_login import LoginManager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session

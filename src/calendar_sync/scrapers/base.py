@@ -90,14 +90,65 @@ async def find_calendar_frame(page: Page) -> Optional[Frame]:
     return None
 
 
-async def wait_for_calendar_frame(page: Page, timeout_ms: int = 8000) -> Optional[Frame]:
-    """Wait for calendar iframe to appear."""
+async def wait_for_calendar_frame(page: Page, timeout_ms: int = 25000) -> Optional[Frame]:
+    """Wait for FullCalendar iframe to appear and have rendered events.
+
+    Strategy (in order):
+    1. Poll page.frames looking for a frame with 'indisponibilites' in its URL
+       and at least one .fc-event node inside it.
+    2. Fallback: any frame that has .fc-event nodes.
+    3. Fallback: watch for an <iframe> element to appear in the DOM, grab its
+       src, and then poll frames again.
+
+    The timeout is generous (25 s) because after login Snexi can take several
+    seconds for the iframe to navigate and FullCalendar to render.
+    """
     import asyncio
 
     deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+
     while asyncio.get_event_loop().time() < deadline:
-        frame = await find_calendar_frame(page)
-        if frame:
-            return frame
-        await asyncio.sleep(0.5)
+        # --- Pass 1: frame with correct URL + events ---
+        for frame in page.frames:
+            if "indisponibilites" in frame.url:
+                try:
+                    has_events = await frame.evaluate(
+                        "!!document.querySelector('.fc-event, .fc-time-grid-event, .fc-day-grid-event')"
+                    )
+                    if has_events:
+                        logger.debug(f"[FRAME] Found calendar frame (url match + events): {frame.url[:80]}")
+                        return frame
+                except Exception:
+                    pass
+
+        # --- Pass 2: any frame with FullCalendar events ---
+        for frame in page.frames:
+            if frame.url in ("about:blank", ""):
+                continue
+            try:
+                has_events = await frame.evaluate(
+                    "!!document.querySelector('.fc-event, .fc-time-grid-event, .fc-day-grid-event')"
+                )
+                if has_events:
+                    logger.debug(f"[FRAME] Found calendar frame (events fallback): {frame.url[:80]}")
+                    return frame
+            except Exception:
+                pass
+
+        # --- Pass 3: iframe DOM element appeared but not yet navigated ---
+        try:
+            iframe_src = await page.evaluate(
+                """() => {
+                    const iframe = document.querySelector('iframe[src*="indisponibilites"], iframe[src*="planning"], iframe[src*="calendar"]');
+                    return iframe ? iframe.src : null;
+                }"""
+            )
+            if iframe_src:
+                logger.debug(f"[FRAME] iframe DOM found with src: {iframe_src[:80]} — waiting for frame load…")
+        except Exception:
+            pass
+
+        await asyncio.sleep(0.8)
+
+    logger.warning(f"[FRAME] Calendar frame not found after {timeout_ms}ms.")
     return None

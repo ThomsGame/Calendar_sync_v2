@@ -260,6 +260,17 @@ async def login_snexi(page: Page, settings: Settings) -> list[Appointment]:
         logger.error(f"[LOGIN] {e}")
         raise
 
+    # Wait for the iframe to appear in the DOM before polling frames
+    try:
+        await page.wait_for_selector(
+            "iframe[src*='indisponibilites'], iframe[src*='planning'], iframe[src*='calendar'], iframe",
+            timeout=15000,
+        )
+        logger.info("[LOGIN] iframe element detected in DOM.")
+        await page.wait_for_timeout(1500)  # let it start navigating
+    except Exception:
+        logger.warning("[LOGIN] No iframe element found via selector — will still try frame poll.")
+
     # Find calendar frame
     cal_frame = await wait_for_calendar_frame(page)
     if not cal_frame:
@@ -274,6 +285,27 @@ async def extract_appointments(cal_frame: Frame) -> list[Appointment]:
     all_appointments: list[Appointment] = []
     seen_keys: set[str] = set()
     event_selectors = ".fc-event, a.fc-event, .fc-day-grid-event, .fc-time-grid-event"
+
+    # Wait for FullCalendar to finish rendering — retry until events appear or timeout
+    for _wait_attempt in range(12):
+        try:
+            has_events = await cal_frame.evaluate(
+                "!!document.querySelector('.fc-event, .fc-time-grid-event, .fc-day-grid-event')"
+            )
+            has_toolbar = await cal_frame.evaluate(
+                "!!document.querySelector('.fc-toolbar, .fc-header-toolbar')"
+            )
+            if has_toolbar:
+                if has_events:
+                    logger.info("[EXTRACTION] FullCalendar ready with events.")
+                    break
+                else:
+                    logger.debug("[EXTRACTION] FullCalendar toolbar visible but no events yet, waiting…")
+        except Exception:
+            pass
+        await cal_frame.wait_for_timeout(1500)
+    else:
+        logger.warning("[EXTRACTION] FullCalendar may not have fully rendered — proceeding anyway.")
 
     for semaine in range(4):
         await cal_frame.wait_for_timeout(1200)

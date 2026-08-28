@@ -226,6 +226,9 @@ def google_auth():
 @bp.route("/google/callback")
 def google_callback():
     """Handle Google OAuth callback, store refresh token."""
+    import os as _os
+    _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # allow http://localhost redirect
+
     state = session.pop("oauth_state", None)
     user_id = session.pop("oauth_user_id", None)
 
