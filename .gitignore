@@ -1,5 +1,6 @@
 # Environment
 .env
+.env.dashboard
 credentials.json
 *.credentials.json
 
