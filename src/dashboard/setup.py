@@ -204,41 +204,49 @@ def step3_google():
     )
 
 
-def _sign_state(user_id: int, raw_state: str) -> str:
-    """Embed user_id into the OAuth state so it survives across IP changes.
+def _make_state(user_id: int, code_verifier: str) -> str:
+    """Pack user_id + code_verifier into a signed, URL-safe state string.
 
-    Format: "<user_id>:<raw_state>" signed with the app secret key via HMAC.
-    This means we never depend on the Flask session cookie surviving the
-    Google redirect (which breaks when the browser hits localhost but the
-    server was reached via LAN IP).
+    The state travels back from Google in the redirect URL, so both pieces
+    of data survive even when the Flask session cookie is lost (e.g. browser
+    accesses the server via LAN IP but the redirect comes back on 127.0.0.1).
+
+    Format (base64url, no padding):
+        base64url( "<user_id>|<code_verifier>" ) + "." + hmac_sig[:16]
     """
+    import base64
     import hashlib
-    import hmac
+    import hmac as _hmac
+
     secret = current_app.config["SECRET_KEY"]
     if isinstance(secret, str):
         secret = secret.encode()
-    payload = f"{user_id}:{raw_state}"
-    sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()[:16]
-    return f"{user_id}.{raw_state}.{sig}"
+
+    payload = f"{user_id}|{code_verifier}"
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+    sig = _hmac.new(secret, payload_b64.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{payload_b64}.{sig}"
 
 
-def _verify_state(signed_state: str) -> tuple[int | None, str | None]:
-    """Decode and verify a signed state string. Returns (user_id, raw_state) or (None, None)."""
+def _parse_state(state: str) -> tuple[int | None, str | None]:
+    """Decode and verify a state string. Returns (user_id, code_verifier) or (None, None)."""
+    import base64
     import hashlib
-    import hmac
+    import hmac as _hmac
+
     try:
-        parts = signed_state.split(".", 2)
-        if len(parts) != 3:
-            return None, None
-        user_id_str, raw_state, sig = parts
+        payload_b64, sig = state.rsplit(".", 1)
         secret = current_app.config["SECRET_KEY"]
         if isinstance(secret, str):
             secret = secret.encode()
-        payload = f"{user_id_str}:{raw_state}"
-        expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()[:16]
-        if not hmac.compare_digest(sig, expected):
+        expected = _hmac.new(secret, payload_b64.encode(), hashlib.sha256).hexdigest()[:16]
+        if not _hmac.compare_digest(sig, expected):
             return None, None
-        return int(user_id_str), raw_state
+        # Re-pad and decode
+        padding = 4 - len(payload_b64) % 4
+        payload = base64.urlsafe_b64decode(payload_b64 + "=" * (padding % 4)).decode()
+        user_id_str, verifier = payload.split("|", 1)
+        return int(user_id_str), verifier
     except Exception:
         return None, None
 
@@ -251,31 +259,26 @@ def google_auth():
         flash("Google OAuth non configuré sur ce serveur.", "danger")
         return redirect(url_for("setup.step3_google"))
 
+    import base64
+    import hashlib
     import secrets as _secrets
-    flow = _build_flow()
 
-    # Generate PKCE code verifier + challenge so Google accepts the exchange
-    # (required when Google Cloud project has PKCE enforced on the OAuth client)
+    # PKCE: generate verifier + SHA-256 challenge
     code_verifier = _secrets.token_urlsafe(64)
-    import hashlib, base64
     digest = hashlib.sha256(code_verifier.encode()).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
-    raw_state = _secrets.token_urlsafe(24)
-    signed = _sign_state(current_user.id, raw_state)
+    # Pack user_id + verifier into the state so the callback is session-independent
+    state = _make_state(current_user.id, code_verifier)
 
+    flow = _build_flow()
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
-        state=signed,
+        state=state,
         code_challenge=code_challenge,
         code_challenge_method="S256",
     )
-
-    # Store verifier in session (same host, so session is fine for this leg)
-    session["oauth_code_verifier"] = code_verifier
-    session["oauth_state"] = signed   # also keep for fallback validation
-    session["oauth_user_id"] = current_user.id
     return redirect(auth_url)
 
 
@@ -283,37 +286,27 @@ def google_auth():
 def google_callback():
     """Handle Google OAuth callback, store refresh token."""
     import os as _os
-    _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # allow http://localhost redirect
+    _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
     returned_state = request.args.get("state", "")
 
-    # Primary: decode user_id from the signed state (works even if session cookie
-    # was lost because the browser was redirected through a different host/IP)
-    user_id, raw_state = _verify_state(returned_state)
-
-    # Fallback: session (works when same host throughout)
-    if user_id is None:
-        user_id = session.pop("oauth_user_id", None)
-        session.pop("oauth_state", None)
+    # Decode user_id + code_verifier from the signed state — no session needed
+    user_id, code_verifier = _parse_state(returned_state)
 
     if not user_id:
         flash("Session OAuth invalide. Recommencez.", "danger")
         return redirect(url_for("setup.step3_google"))
-
-    # Retrieve PKCE verifier — try session first, then skip if absent
-    code_verifier = session.pop("oauth_code_verifier", None)
 
     flow = _build_flow()
     try:
         flow.fetch_token(
             authorization_response=request.url,
             state=returned_state,
-            code_verifier=code_verifier,  # None is safe — omits the parameter
+            code_verifier=code_verifier,
         )
     except Exception as e:
         err = str(e)
         if "SSL" in err or "certificate" in err.lower():
-            # Retry without SSL verification (corporate CA environment only)
             import urllib3, requests as _req
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             _s = _req.Session()
