@@ -250,17 +250,59 @@ def _is_odm_event(evt: Appointment, meta: EventMeta) -> bool:
     )
 
 
+def _extract_city(address: Optional[str]) -> str:
+    """Best-effort city extraction from a free-form address string.
+
+    Handles formats like:
+      "200 rue Hélène Boucher, n°immeuble 2245/n°lot 53, 95220 Herblay"
+      "76 RUE DU GROS NOYER, 95120 ERMONT"
+      "4 rue Germaine Tillion n°immeuble 612 /n°lot 75 92700 Colombes"
+    Returns the city name (title-cased) or empty string if not found.
+    """
+    if not address:
+        return ""
+    # Try comma-separated: last segment that contains a postal code + city
+    for segment in reversed(address.split(",")):
+        seg = segment.strip()
+        m = re.search(r"\b\d{5}\s+(.+)", seg)
+        if m:
+            return m.group(1).strip().title()
+    # No comma — try inline postal code pattern
+    m = re.search(r"\b\d{5}\s+(.+)", address)
+    if m:
+        return m.group(1).strip().title()
+    return ""
+
+
 def _build_summary(evt: Appointment, meta: EventMeta) -> str:
+    """Build a descriptive calendar event title.
+
+    Format: "<Type> · <ref number> · <city>"
+
+    Examples:
+      "EDL Entrée · OS 2378721 · Herblay"
+      "EDL Sortie · OS 2375485 · Rueil-Malmaison"
+      "ODM Entrée · 11378080 · Ermont"
+      "ODM Sortie · 11383291 · Villetaneuse"
+
+    Falls back gracefully when number or city are unavailable.
+    """
+    ref = _get_event_ref_number(evt, meta)
+    city = _extract_city(evt.address)
+
     if _is_odm_event(evt, meta):
-        # ODM events: "ODM E" for entree, "ODM S" for sortie, "ODM" for others
-        if meta.type.value == "entree":
-            return "ODM E"
-        elif meta.type.value == "sortie":
-            return "ODM S"
-        return "ODM"
-    # OS events
-    suffix = "E" if meta.type.value == "entree" else "S"
-    return f"OS {suffix}"
+        label = "ODM Entrée" if meta.type.value == "entree" else "ODM Sortie" if meta.type.value == "sortie" else "ODM"
+        ref_part = ref or ""
+    else:
+        label = "EDL Entrée" if meta.type.value == "entree" else "EDL Sortie"
+        ref_part = f"OS {ref}" if ref else ""
+
+    parts = [label]
+    if ref_part:
+        parts.append(ref_part)
+    if city:
+        parts.append(city)
+    return " · ".join(parts)
 
 
 def _get_dedup_family(evt: Appointment, meta: EventMeta) -> str:
