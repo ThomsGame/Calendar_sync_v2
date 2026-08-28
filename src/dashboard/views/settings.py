@@ -66,6 +66,17 @@ def index():
             db.commit()
             flash("Options mises à jour.", "success")
 
+        elif section == "email_drafts":
+            creds.gmail_drafts_enabled = request.form.get("gmail_drafts_enabled") == "on"
+            constatimmo_email = request.form.get("constatimmo_contact_email", "").strip()
+            snexi_email = request.form.get("snexi_contact_email", "").strip()
+            sender = request.form.get("sender_name", "").strip()
+            creds.constatimmo_contact_email = constatimmo_email or None
+            creds.snexi_contact_email = snexi_email or None
+            creds.sender_name = sender or None
+            db.commit()
+            flash("Paramètres des brouillons emails mis à jour.", "success")
+
         return redirect(url_for("settings.index"))
 
     # Mask stored passwords — show placeholder if set

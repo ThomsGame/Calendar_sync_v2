@@ -118,9 +118,53 @@ def _load_or_refresh_credentials(settings: Settings) -> Optional[Credentials]:
     return creds
 
 
+def _credentials_from_refresh_token(settings: Settings) -> Optional[Credentials]:
+    """Build Credentials directly from a stored refresh token (no token.json).
+
+    Used by the dashboard where each user's tokens are stored encrypted in the
+    database rather than on disk.
+    """
+    if not settings.google_refresh_token:
+        return None
+    if not settings.google_oauth_client_id or not settings.google_oauth_client_secret:
+        logger.error("[GOOGLE] GOOGLE_OAUTH_CLIENT_ID / SECRET not set — cannot use refresh token.")
+        return None
+
+    creds = Credentials(
+        token=None,
+        refresh_token=settings.google_refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.google_oauth_client_id,
+        client_secret=settings.google_oauth_client_secret,
+        scopes=SCOPES,
+    )
+    # Force a refresh to get a valid access token
+    try:
+        import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        session = requests.Session()
+        session.verify = False
+        creds.refresh(Request(session=session))
+        logger.info("[GOOGLE] Credentials refreshed from stored refresh token.")
+        return creds
+    except Exception as e:
+        logger.error(f"[GOOGLE] Failed to refresh credentials from refresh token: {e}")
+        return None
+
+
+def _get_credentials(settings: Settings) -> Optional[Credentials]:
+    """Return valid Google credentials, preferring refresh token over token.json."""
+    # Dashboard users supply a refresh token directly — prefer that
+    if settings.google_refresh_token:
+        return _credentials_from_refresh_token(settings)
+    # Standalone CLI users use token.json
+    return _load_or_refresh_credentials(settings)
+
+
 def get_google_service(settings: Settings):
     """Build and return an authenticated Google Calendar service."""
-    creds = _load_or_refresh_credentials(settings)
+    creds = _get_credentials(settings)
     if not creds:
         return None
     return build("calendar", "v3", credentials=creds, http=_HTTP)
@@ -128,7 +172,7 @@ def get_google_service(settings: Settings):
 
 def get_gmail_service(settings: Settings):
     """Build and return an authenticated Gmail service."""
-    creds = _load_or_refresh_credentials(settings)
+    creds = _get_credentials(settings)
     if not creds:
         return None
     return build("gmail", "v1", credentials=creds, http=_HTTP)
@@ -251,18 +295,25 @@ def _build_description(evt: Appointment, family: str) -> str:
 # Main sync function
 # ---------------------------------------------------------------------------
 
-async def sync_to_google_calendar(events: list[Appointment], settings: Settings) -> tuple[int, int, int]:
+async def sync_to_google_calendar(
+    events: list[Appointment], settings: Settings
+) -> tuple[int, int, int, list[Appointment]]:
     """Sync appointments to Google Calendar.
 
     Returns:
-        (created_count, updated_count, skipped_count)
+        (created_count, updated_count, skipped_count, newly_created_appointments)
+
+    ``newly_created_appointments`` contains copies of every Appointment that was
+    actually inserted into Google Calendar during this run (not updated, not
+    skipped).  Each copy has ``meta`` populated so draft creation can identify
+    the event type and choose the right recipient.
     """
     dry_run = settings.dry_run
 
     service = get_google_service(settings)
     if not service:
         logger.error("[GOOGLE] Could not build Google Calendar service — aborting sync.")
-        return 0, 0, 0
+        return 0, 0, 0, []
 
     # Fetch existing events (14 days back, 120 days forward)
     now = datetime.utcnow()
@@ -299,6 +350,7 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
     created_count = 0
     updated_count = 0
     skipped_count = 0
+    newly_created: list[Appointment] = []
 
     for evt in events:
         meta = evt.meta or EventMeta()
@@ -412,12 +464,14 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
         # --- Create new event ---
         if dry_run:
             created_count += 1
+            newly_created.append(evt.model_copy(update={"meta": meta}))
             logger.info(f"[DRY_RUN] Would create: {summary} {start_iso} @ {target_cal_id}")
             continue
 
         try:
             result = service.events().insert(calendarId=target_cal_id, body=g_event).execute()
             created_count += 1
+            newly_created.append(evt.model_copy(update={"meta": meta}))
             logger.info(
                 f"[GOOGLE] Created: {summary} on {parsed_date} {start_time}"
                 f"{f'-{end_time}' if end_time else ''}"
@@ -439,4 +493,4 @@ async def sync_to_google_calendar(events: list[Appointment], settings: Settings)
     logger.info(
         f"[SYNC] Done — Created: {created_count} | Updated: {updated_count} | Skipped: {skipped_count}"
     )
-    return created_count, updated_count, skipped_count
+    return created_count, updated_count, skipped_count, newly_created

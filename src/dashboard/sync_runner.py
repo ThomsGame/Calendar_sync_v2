@@ -25,6 +25,9 @@ from dashboard.models import SyncEvent, SyncRun, User, UserCredentials
 
 def _build_settings(creds: UserCredentials) -> Settings:
     """Construct a Settings object from decrypted database credentials."""
+    from dashboard import get_db
+    from flask import current_app
+
     return Settings(
         snexi_url="https://snexi.fr/portail",
         snexi_username=creds.snexi_username or "",
@@ -36,9 +39,18 @@ def _build_settings(creds: UserCredentials) -> Settings:
         google_calendar_id=creds.google_calendar_os_id or "primary",
         google_calendar_os_id=creds.google_calendar_os_id or "",
         google_calendar_odm_id=creds.google_calendar_odm_id or "",
+        # Pass the stored refresh token so google_calendar.py bypasses token.json
+        google_oauth_client_id=current_app.config.get("GOOGLE_CLIENT_ID", ""),
+        google_oauth_client_secret=current_app.config.get("GOOGLE_CLIENT_SECRET", ""),
+        google_refresh_token=decrypt(creds.google_refresh_token_enc or ""),
         snexi_enrich_details=creds.snexi_enrich_details,
         constatimmo_enrich_details=creds.constatimmo_enrich_details,
         dry_run=creds.dry_run,
+        # Gmail draft settings
+        gmail_drafts_enabled=creds.gmail_drafts_enabled,
+        constatimmo_contact_email=creds.constatimmo_contact_email or "",
+        snexi_contact_email=creds.snexi_contact_email or "",
+        sender_name=creds.sender_name or "",
     )
 
 
@@ -138,10 +150,10 @@ async def _run_sync_async(
     logger.info(f"[RUN {run_id}] Kept {filter_stats['kept']}/{len(all_events)} events after filtering.")
 
     # --- Sync to Google Calendar ---
+    newly_created_events: list[Appointment] = []
     if business:
         try:
-            # sync_to_google_calendar returns counts; we patch it to also return per-event results
-            created, updated, skipped = await _sync_with_counts(business, settings)
+            created, updated, skipped, newly_created_events = await _sync_with_counts(business, settings)
             stats["events_created"] = created
             stats["events_updated"] = updated
             stats["events_skipped"] = skipped
@@ -153,50 +165,52 @@ async def _run_sync_async(
             else:
                 stats["error"] = f"Google: {e}"
 
+    # --- Gmail Drafts ---
+    if settings.gmail_drafts_enabled and newly_created_events:
+        try:
+            from calendar_sync.email import DraftRecipients, create_gmail_drafts
+            from calendar_sync.sync.google_calendar import get_gmail_service
+
+            gmail_service = get_gmail_service(settings)
+            if gmail_service:
+                recipients = DraftRecipients(
+                    snexi_contact=settings.snexi_contact_email or None,
+                    constatimmo_contact=settings.constatimmo_contact_email or None,
+                )
+                draft_results = create_gmail_drafts(
+                    service=gmail_service,
+                    appointments=newly_created_events,
+                    recipients=recipients,
+                    sender_name=settings.sender_name,
+                    dry_run=settings.dry_run,
+                )
+                stats["draft_results"] = draft_results
+                stats["email_drafts_created"] = sum(1 for r in draft_results if r.ok)
+                logger.info(
+                    f"[RUN {run_id}][EMAIL] {stats['email_drafts_created']}"
+                    f"/{len(draft_results)} drafts created."
+                )
+            else:
+                logger.warning(f"[RUN {run_id}][EMAIL] Gmail service unavailable — skipping drafts.")
+        except Exception as e:
+            logger.error(f"[RUN {run_id}][EMAIL] Draft creation failed: {e}")
+            if stats["error"]:
+                stats["error"] += f" | Email: {e}"
+            else:
+                stats["error"] = f"Email: {e}"
+
     return stats
 
 
 async def _sync_with_counts(
     events: list[Appointment],
     settings: Settings,
-) -> tuple[int, int, int]:
-    """Wrapper around sync_to_google_calendar that returns (created, updated, skipped)."""
-    # We monkey-patch the logger to capture counts from the sync module.
-    # A cleaner approach is to refactor sync_to_google_calendar to return counts,
-    # but we keep the existing code untouched for now.
+) -> tuple[int, int, int, list[Appointment]]:
+    """Wrapper around sync_to_google_calendar that returns counts + new appointments."""
     from calendar_sync.sync.google_calendar import sync_to_google_calendar
 
-    created = updated = skipped = 0
-    original_info = logger.info
-
-    def _capture(msg, *args, **kwargs):
-        nonlocal created, updated, skipped
-        msg_str = str(msg)
-        if "[SYNC] Created:" in msg_str:
-            parts = msg_str.split("|")
-            for p in parts:
-                p = p.strip()
-                if p.startswith("Created:"):
-                    try:
-                        created = int(p.split(":")[1].strip())
-                    except ValueError:
-                        pass
-                elif p.startswith("Skipped:"):
-                    try:
-                        skipped = int(p.split(":")[1].strip())
-                    except ValueError:
-                        pass
-        if "[GOOGLE] Updated:" in msg_str:
-            updated += 1
-        original_info(msg, *args, **kwargs)
-
-    logger.info = _capture
-    try:
-        await sync_to_google_calendar(events, settings)
-    finally:
-        logger.info = original_info
-
-    return created, updated, skipped
+    created, updated, skipped, newly_created = await sync_to_google_calendar(events, settings)
+    return created, updated, skipped, newly_created
 
 
 def run_sync_for_user(user_id: int, trigger: str = "manual") -> Optional[int]:
@@ -245,6 +259,19 @@ def run_sync_for_user(user_id: int, trigger: str = "manual") -> Optional[int]:
         )
         for se in sync_events:
             db.add(se)
+
+        # Persist email draft records
+        from dashboard.models import EmailDraft
+        for dr in stats.get("draft_results", []):
+            db.add(EmailDraft(
+                user_id=user_id,
+                run_id=run_id,
+                gmail_draft_id=dr.gmail_draft_id if dr.ok else None,
+                recipient=dr.recipient,
+                subject=dr.subject,
+                body_preview=dr.body_preview[:500],
+                status="draft" if dr.ok else "error",
+            ))
 
         # Update run
         run.finished_at = datetime.now()

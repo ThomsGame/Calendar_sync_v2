@@ -35,6 +35,8 @@
             <span class="badge badge-neutral">Brouillon</span>
           {% elif draft.status == 'sent' %}
             <span class="badge badge-success">Envoyé</span>
+          {% elif draft.status == 'error' %}
+            <span class="badge badge-danger">Erreur</span>
           {% else %}
             <span class="badge badge-warning">Inconnu</span>
           {% endif %}

@@ -78,6 +78,17 @@ class UserCredentials(Base):
     constatimmo_enrich_details: Mapped[bool] = mapped_column(Boolean, default=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Gmail draft settings
+    gmail_drafts_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Recipient email to notify when a Snexi OS event is added
+    # (i.e. "I'm now busy — tell Constatimmo")
+    constatimmo_contact_email: Mapped[Optional[str]] = mapped_column(String(255))
+    # Recipient email to notify when a Constatimmo ODM is added
+    # (i.e. "I'm now busy — tell Snexi")
+    snexi_contact_email: Mapped[Optional[str]] = mapped_column(String(255))
+    # Optional sender display name used in email signatures
+    sender_name: Mapped[Optional[str]] = mapped_column(String(255))
+
     # Sync schedule (hour of day, 0-23, Europe/Paris)
     sync_hour: Mapped[int] = mapped_column(Integer, default=7)
 

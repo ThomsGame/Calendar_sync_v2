@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     google_token_path: str = "./token.json"
     google_calendar_os_id: str = ""
     google_calendar_odm_id: str = ""
+    # Optional: set by dashboard to bypass token.json (per-user refresh token)
+    google_refresh_token: str = ""
 
     # Google Calendar event colors (1-11, Google Calendar palette)
     google_color_snexi: str = "5"
@@ -43,6 +45,14 @@ class Settings(BaseSettings):
     dry_run: bool = False
     snexi_enrich_details: bool = True
     constatimmo_enrich_details: bool = True
+
+    # Gmail draft settings
+    gmail_drafts_enabled: bool = True
+    # Email to notify when a Snexi OS event is created (tell Constatimmo)
+    constatimmo_contact_email: str = ""
+    # Email to notify when a Constatimmo ODM is created (tell Snexi)
+    snexi_contact_email: str = ""
+    sender_name: str = ""
 
     @property
     def os_calendar_id(self) -> str:

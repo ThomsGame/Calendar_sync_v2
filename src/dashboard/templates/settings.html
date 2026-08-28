@@ -108,4 +108,50 @@
     <button type="submit" class="btn btn-secondary">Enregistrer les options</button>
   </form>
 </div>
+
+<!-- Email drafts -->
+<div class="card">
+  <h3>Brouillons d'indisponibilité (Gmail)</h3>
+  <p class="text-muted" style="margin-bottom:1rem;">
+    Lorsqu'un nouveau créneau est créé dans votre calendrier, un brouillon Gmail est
+    automatiquement préparé pour notifier l'autre plateforme que vous n'êtes plus disponible
+    sur ce créneau. Vous restez libre de le relire et de l'envoyer depuis Gmail.
+  </p>
+  <form method="post">
+    <input type="hidden" name="section" value="email_drafts" />
+    <div class="form-group form-check" style="margin-bottom:1rem;">
+      <input type="checkbox" id="gmail_drafts_enabled" name="gmail_drafts_enabled"
+             {{ 'checked' if creds.gmail_drafts_enabled }} />
+      <label for="gmail_drafts_enabled">Activer la création automatique de brouillons</label>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Email destinataire Constatimmo</label>
+        <input type="email" name="constatimmo_contact_email"
+               value="{{ creds.constatimmo_contact_email or '' }}"
+               placeholder="contact@constatimmo.com" />
+        <small class="text-muted">
+          Reçoit un brouillon quand un <strong>OS Snexi</strong> est ajouté à votre agenda.
+        </small>
+      </div>
+      <div class="form-group">
+        <label>Email destinataire Snexi</label>
+        <input type="email" name="snexi_contact_email"
+               value="{{ creds.snexi_contact_email or '' }}"
+               placeholder="contact@snexi.fr" />
+        <small class="text-muted">
+          Reçoit un brouillon quand un <strong>ODM Constatimmo</strong> est ajouté à votre agenda.
+        </small>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Nom / signature (optionnel)</label>
+      <input type="text" name="sender_name"
+             value="{{ creds.sender_name or '' }}"
+             placeholder="Jean Dupont" />
+      <small class="text-muted">Apparaît en bas des emails générés.</small>
+    </div>
+    <button type="submit" class="btn btn-secondary">Enregistrer les paramètres email</button>
+  </form>
+</div>
 {% endblock %}
